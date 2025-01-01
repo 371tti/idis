@@ -20,7 +20,7 @@ pub enum LocationQuery {
     All,                             // 条件なし（全データ対象） (object, list)
     This,                            // 現在の場所を対象
     // ネストの進行
-    Range(i32, i32, Box<LocationQuery>),    // 範囲内のリスト要素を対象 (-1, 0 は先頭、0, -1 は末尾) (list)
+    Slice(i32, i32, Box<LocationQuery>),    // 範囲内のリスト要素を対象 (-1, 0 は先頭、0, -1 は末尾) (list)
     Index(i32, Box<LocationQuery>),         // 指定されたインデックスの要素を対象 (list)
     IndexBack(i32, Box<LocationQuery>),     // 末尾から指定されたインデックスの要素を対象 (list)
     Nested(Index, Box<LocationQuery>),      // ネストされたフィールド内の指定場所を対象 (object, list)
@@ -35,7 +35,7 @@ pub enum InsertQuery {
     AtBack(i32),                     // リストの末尾に挿入 0 は末尾 [...X<1>, X<0>] (list)
     Push,                            // リストの末尾に挿入もしくは単に挿入 (list, object)
     // ネストの進行
-    Range(i32, i32, Box<InsertQuery>),                 // リストの値が範囲内にある (-1, 0 は先頭, 0, -1 は末尾) (list)
+    Slice(i32, i32, Box<InsertQuery>),                 // リストの値が範囲内にある (-1, 0 は先頭, 0, -1 は末尾) (list)
     Index(i32, Box<InsertQuery>),                      // インデックスで指定された場所 (list)
     IndexBack(i32, Box<InsertQuery>),                  // 末尾からのインデックスで指定された場所 (list)
     Nested(Index, Box<InsertQuery>), // ネストされたフィールドに対するクエリ (object, list)
@@ -53,14 +53,12 @@ pub enum FeatureQuery {
     MatchStr(String),           // 値が一致 (String)
     MatchBool(bool),             // 値が一致 (bool)
     // ネストの進行
-    Range(i32, i32, Box<FeatureQuery>), // リストの値が範囲内にある (list)
     Index(i32, Box<FeatureQuery>),                      // インデックスで指定された場所 (list)
-    IndexBack(i32, Box<FeatureQuery>),                  // 末尾からのインデックスで指定された場所 (list)
-    Nested(Index, Box<FeatureQuery>), // ネストされたフィールドの特徴 (object, list)
+    Nested(String, Box<FeatureQuery>), // ネストされたフィールドの特徴 (object, list)
     // 論理操作
     And(Vec<FeatureQuery>),          // AND条件 (object, list)
     Or(Vec<FeatureQuery>),           // OR条件 (object, list)
-    Not(Vec<FeatureQuery>),          // NOT条件 (object, list)
+    Not(Box<FeatureQuery>),          // NOT条件 (object, list)
 }
 
 /// 操作の種類
