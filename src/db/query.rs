@@ -1,9 +1,5 @@
-
-use std::{collections::HashMap, hash::Hash, vec};
-use mongodb::results;
 use ruid_set::ruid::Ruid;
-use serde::de::value;
-use serde_json::{Map, Value};
+
 
 
 /// Indexの種類
@@ -74,268 +70,197 @@ pub enum QueryType {
     List(Box<Ruid>),                        // 全データをリスト取得 (object, list)
 }
 
+pub mod generator {
+    use mongodb::bson::{bson, Bson, Document};
+
+    use super::FeatureQuery;
+    
+            
+    /// MongoDBクエリ変換時の"演算子"を表す
+    #[derive(Debug)]
+    enum StackInstruction {
+        Extend,
+        MargeKey,
+        MargeObject,
+    }
+
+    /// スタックに積む1フレーム（1段）の情報をまとめた構造体
+    #[derive(Debug)]
+    pub struct StackFrame<T> {
+        instruction: StackInstruction,
+        result: Bson,
+        query: Vec<T>
+    }
+
+    impl<T> StackFrame<T> {
+        pub fn new(query: Vec<T>) -> Self {
+            StackFrame {
+                instruction: StackInstruction::Extend,
+                result: Bson::Null,
+                query: query,
+            }
+        }
+    }
 
 
-// impl QueryType {
-//     pub fn new() -> QueryType {
-//         QueryType::None
-//     }
+    pub fn feature_query_to_mongo(query: &FeatureQuery) -> Document {
+        let mut stack: Vec<StackFrame<FeatureQuery>> = Vec::new();
 
-//     pub fn to_mongo_query(&self) -> Document {
-//         match self {
-//             QueryType::None => doc! {},
-//             QueryType::Set(r,d q, ) => doc! {
-//                 "$set": location_query_to_mongo(loc_query)
-//             },
-//             QueryType::Add(r, d, insert_query) => doc! {
-//                 "$addToSet": insert_query_to_mongo(insert_query)
-//             },
-//             QueryType::Del(r, d, loc_query) => doc! {
-//                 "$unset": location_query_to_mongo(loc_query)
-//             },
-//             QueryType::Get(r, d, loc_query) => location_query_to_mongo(loc_query),
-//             QueryType::DelMany(r, feat_query) => doc! {
-//                 "$delete": feature_query_to_mongo(feat_query)
-//             },
-//             QueryType::Find(r, feat_query) => feature_query_to_mongo(feat_query),
-//             QueryType::List(r) => doc! {},
-//         }
-//     }
+        stack.push(
+            StackFrame::<FeatureQuery>::new(vec![query.clone()])
+        );
 
-//     pub fn from_json(json: &Value) -> Result<QueryType, ErrState> {
-//         if json.is_null() {
-//             return Ok(QueryType::None);
-//         }
+        while let Some(mut frame) = stack.pop() {
+            match frame.instruction {
+                StackInstruction::Extend => {
+                    // 元フレームからクエリを取り出す
+                    match frame.query.pop() { 
+                        // queryが存在 展開処理
+                        Some(coquery) => {
+                            match coquery {
+                                FeatureQuery::Any => {
+                                    frame.result = bson!({ "$exists": true });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::None => {
+                                    frame.result = bson!({ "$exists": false });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::Less(val) => {
+                                    frame.result = bson!({ "$lte": val });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::Greater(val) => {
+                                    frame.result = bson!({ "$gte": val });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::MatchNum(val) => {
+                                    frame.result = bson!({ "$eq": val });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::MatchStr(val) => {
+                                    frame.result = bson!({ "$eq": val });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::MatchBool(val) => {
+                                    frame.result = bson!({ "$eq": val });
+                                    frame.instruction = StackInstruction::MargeObject;
+                                    stack.push(frame);// これ以上展開しない
+                                },
+                                FeatureQuery::Index(index, feature_query) => {
+                                    frame.result = bson!(index);
+                                    frame.instruction = StackInstruction::MargeKey;
+                                    stack.push(frame);// 元フレームをスタックに積む
+                                    let second_frame = StackFrame::<FeatureQuery>::new(vec![*feature_query]);
+                                    stack.push(second_frame);// 展開フレームをスタックに積む
+                                },
+                                FeatureQuery::Nested(index, feature_query) => {
+                                    frame.result = bson!(index);
+                                    frame.instruction = StackInstruction::MargeKey;
+                                    stack.push(frame);// 元フレームをスタックに積む
+                                    let second_frame = StackFrame::<FeatureQuery>::new(vec![*feature_query]);
+                                    stack.push(second_frame);// 展開フレームをスタックに積む
+                                },
+                                FeatureQuery::And(mut vec) => {
+                                    frame.result = bson!({ "$and": [] });
+                                    let covec = vec.pop().unwrap();
+                                    frame.query = vec;
+                                    frame.instruction = StackInstruction::Extend;
+                                    stack.push(frame); // 元フレームをスタックに積む
+                                    let second_frame = StackFrame::<FeatureQuery>::new(vec![covec]);
+                                    stack.push(second_frame);// 展開フレームをスタックに積む
+                                },
+                                FeatureQuery::Or(mut vec) => {
+                                    frame.result = bson!({ "$or": [] });
+                                    let covec = vec.pop().unwrap();
+                                    frame.query = vec;
+                                    frame.instruction = StackInstruction::Extend;
+                                    stack.push(frame); // 元フレームをスタックに積む
+                                    let second_frame = StackFrame::<FeatureQuery>::new(vec![covec]);
+                                    stack.push(second_frame);// 展開フレームをスタックに積む
+                                },
+                                FeatureQuery::Not(feature_query) => {
+                                    frame.result = bson!({ "$not": Bson::Null });
+                                    frame.instruction = StackInstruction::Extend;
+                                    stack.push(frame); // 元フレームをスタックに積む
+                                    let second_frame = StackFrame::<FeatureQuery>::new(vec![*feature_query]);
+                                    stack.push(second_frame);// 展開フレームをスタックに積む
+                                },
+                            }
+                        },
+                        None =>todo!(), // ここには来ない
+                    }
+                    
+                },
+                StackInstruction::MargeKey => todo!(), // ここには来ない,
+                StackInstruction::MargeObject => {
+                    match stack.last_mut() {
+                        Some(front_frame) => {
+                            match front_frame.instruction {
+                                StackInstruction::Extend => {
+                                    let marge_object = frame.result;
+                                    let marged_object = front_frame.result.clone();
+                                    if let Some((key, value)) = marged_object.as_document().unwrap().iter().next() {
+                                        let new_bson = if let Some(array) = value.clone().as_array_mut() {
+                                            // 配列の場合: 要素を追加
+                                            array.push(marge_object);
+                                            bson!({ key: array })
+                                        } else {
+                                            // 配列でない場合: ドキュメントとしてそのまま突っ込む
+                                            bson!({ key: marge_object })
+                                        };
+                                    
+                                        // 結果を更新
+                                        front_frame.result = new_bson;
+                                    
+                                        // 次のクエリが存在する場合はスタックに追加
+                                        match front_frame.query.pop() {
+                                            Some(coquery) => {
+                                                let second_frame = StackFrame::<FeatureQuery>::new(vec![coquery]);
+                                                stack.push(second_frame);
+                                            },
+                                            None => {
+                                                // 次のクエリがない場合はMargeObjectに設定
+                                                front_frame.instruction = StackInstruction::MargeObject;
+                                            }
+                                        }
+                                    }
+                                    
+                                },
+                                StackInstruction::MargeKey => {
+                                    let marge_object = frame.result;
+                                    let marged_key = front_frame.result.clone();
+                                    let marged_key_str = match marged_key {
+                                        Bson::Int32(num) => num.to_string(),
+                                        Bson::Int64(num) => num.to_string(),
+                                        Bson::String(s) => s,
+                                        _ => todo!(), // ここには来ない,
+                                    };
+                                    let new_bson = bson!({ marged_key_str: marge_object });
+                                    front_frame.instruction = StackInstruction::MargeObject;
+                                    front_frame.result = new_bson;
+                                },
 
-//         let mut flat_map = Vec::new();
-//         {
-//             let mut stack: Vec<(Vec<&str>, &Value)> = Vec::new();
-
-//             stack.push((vec![], json));
-
-//             while let Some((prefix, current)) = stack.pop() {
-//                 match current {
-//                     Value::Object(map) => {
-//                         for (key, value) in map {
-//                             let new_prefix: Vec<&str> = if prefix.is_empty() {
-//                                 key.split('.').collect()
-//                             } else {
-//                                 prefix.iter().chain(key.split('.').collect::<Vec<&str>>().iter()).cloned().collect()
-//                             };
-//                             stack.push((new_prefix, value));
-//                         }
-//                     }
-//                     Value::Bool(b) => {
-//                         flat_map.push((prefix, *b));
-//                     }
-//                     _ => {
-//                         return Err(ErrState::new(0, None).add_message(ERROR("Invalid JSON format".to_string())));
-//                     }
-//                 }
-//             }
-//         }
-
-//         // ここにflat_mapから重複するものや優先するもので 必要ないものを消す処理を書く
-
-//         Ok(QueryType::None)
-//     }
+                                StackInstruction::MargeObject => todo!(), // ここには来ない,
+                            }
+                        },
+                        None => {
+                            stack.push(frame);
+                            break;
+                        },
+                    }
+                },
+            }
+            println!("stack: {:?}", stack);
+        }
 
 
-// }
-
-
-// //////////
-// /// 
-// /// 
-// /// 
-
-
-// use mongodb::bson::{doc, Bson, Document};
-
-// /// LocationQuery を MongoDB クエリに変換
-// fn location_query_to_mongo(query: &LocationQuery) -> Document {
-//     match query {
-//         LocationQuery::All => doc! {}, // 全データ対象
-//         LocationQuery::Key(key) => doc! { key: { "$exists": true } },
-//         LocationQuery::Range(start, end) => doc! { "$slice": [start, end - start] },
-//         LocationQuery::Index(index) => doc! { "$arrayElemAt": ["$array", *index] },
-//         LocationQuery::IndexBack(index) => doc! { "$arrayElemAt": ["$array", -index] },
-//         LocationQuery::Nested(index, subquery) => match index {
-//             Index::Number(num) => {
-//                 let mut sub_doc = location_query_to_mongo(subquery);
-//                 sub_doc.insert("$arrayElemAt", num);
-//                 sub_doc
-//             }
-//             Index::String(key) => {
-//                 let mut sub_doc = location_query_to_mongo(subquery);
-//                 sub_doc.insert(key, Bson::Document(sub_doc.clone()));
-//                 sub_doc
-//             }
-//         },
-//     }
-// }
-
-// /// InsertQuery を MongoDB クエリに変換
-// fn insert_query_to_mongo(query: &InsertQuery) -> Document {
-//     match query {
-//         InsertQuery::AtHead(_) => doc! { "$push": { "$each": ["new_value"], "$position": 0 } },
-//         InsertQuery::AtBack(_) => doc! { "$push": "new_value" },
-//         InsertQuery::Push => doc! { "$push": "new_value" },
-//         InsertQuery::Nested(index, subquery) => match index {
-//             Index::Number(num) => {
-//                 let mut sub_doc = insert_query_to_mongo(subquery);
-//                 sub_doc.insert("$arrayElemAt", num);
-//                 sub_doc
-//             }
-//             Index::String(key) => {
-//                 let mut sub_doc = insert_query_to_mongo(subquery);
-//                 sub_doc.insert(key, Bson::Document(sub_doc.clone()));
-//                 sub_doc
-//             }
-//         },
-//     }
-// }
-
-// /// FeatureQuery を MongoDB クエリに変換
-// fn feature_query_to_mongo(query: &FeatureQuery) -> Document {
-//     match query {
-//         FeatureQuery::Less(value) => doc! { "$lt": value },
-//         FeatureQuery::Greater(value) => doc! { "$gt": value },
-//         FeatureQuery::MatchNum(value) => doc! { "$eq": value },
-//         FeatureQuery::MatchStr(value) => doc! { "$eq": value },
-//         FeatureQuery::MatchBool(value) => doc! { "$eq": value },
-//         FeatureQuery::Range(start, end, subquery) => {
-//             let mut sub_doc = feature_query_to_mongo(subquery);
-//             sub_doc.insert("$gte", start);
-//             sub_doc.insert("$lte", end);
-//             sub_doc
-//         }
-//         FeatureQuery::Nested(index, subquery) => match index {
-//             Index::Number(num) => {
-//                 let mut sub_doc = feature_query_to_mongo(subquery);
-//                 sub_doc.insert("$arrayElemAt", num);
-//                 sub_doc
-//             }
-//             Index::String(key) => {
-//                 let mut sub_doc = feature_query_to_mongo(subquery);
-//                 sub_doc.insert(key, Bson::Document(sub_doc.clone()));
-//                 sub_doc
-//             }
-//         },
-//         FeatureQuery::And(subqueries) => doc! {
-//             "$and": subqueries.iter().map(feature_query_to_mongo).collect::<Vec<Document>>()
-//         },
-//         FeatureQuery::Or(subqueries) => doc! {
-//             "$or": subqueries.iter().map(feature_query_to_mongo).collect::<Vec<Document>>()
-//         },
-//         FeatureQuery::Not(subquery) => doc! {
-//             "$not": feature_query_to_mongo(subquery)
-//         },
-//     }
-// }
-
-// /// QueryType を MongoDB クエリに変換
-// fn query_type_to_mongo(query: &QueryType) -> Document {
-//     match query {
-//         QueryType::None => doc! {},
-//         QueryType::Set(_, _, loc_query) => doc! {
-//             "$set": location_query_to_mongo(loc_query)
-//         },
-//         QueryType::Add(_, _, insert_query) => doc! {
-//             "$addToSet": insert_query_to_mongo(insert_query)
-//         },
-//         QueryType::Del(_, _, loc_query) => doc! {
-//             "$unset": location_query_to_mongo(loc_query)
-//         },
-//         QueryType::Get(_, _, loc_query) => location_query_to_mongo(loc_query),
-//         QueryType::DelMany(_, feat_query) => doc! {
-//             "$delete": feature_query_to_mongo(feat_query)
-//         },
-//         QueryType::Find(_, feat_query) => feature_query_to_mongo(feat_query),
-//         QueryType::List(_) => doc! {},
-//     }
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use mongodb::bson::doc;
-
-//     #[test]
-//     fn test_location_query_to_mongo_output() {
-//         let query = LocationQuery::Key("field".to_string());
-//         let bson_query = location_query_to_mongo(&query);
-//         println!("Key Query BSON: {:?}", bson_query);
-
-//         let range_query = LocationQuery::Range(0, 5);
-//         let bson_range_query = location_query_to_mongo(&range_query);
-//         println!("Range Query BSON: {:?}", bson_range_query);
-
-//         let nested_query = LocationQuery::Nested(
-//             Index::String("nested_field".to_string()),
-//             Box::new(LocationQuery::Key("inner_field".to_string())),
-//         );
-//         let bson_nested_query = location_query_to_mongo(&nested_query);
-//         println!("Nested Query BSON: {:?}", bson_nested_query);
-//     }
-
-//     #[test]
-//     fn test_insert_query_to_mongo_output() {
-//         let push_query = InsertQuery::Push;
-//         let bson_push_query = insert_query_to_mongo(&push_query);
-//         println!("Push Query BSON: {:?}", bson_push_query);
-
-//         let at_head_query = InsertQuery::AtHead(0);
-//         let bson_at_head_query = insert_query_to_mongo(&at_head_query);
-//         println!("AtHead Query BSON: {:?}", bson_at_head_query);
-
-//         let nested_insert_query = InsertQuery::Nested(
-//             Index::String("nested_field".to_string()),
-//             Box::new(InsertQuery::Push),
-//         );
-//         let bson_nested_insert_query = insert_query_to_mongo(&nested_insert_query);
-//         println!("Nested Insert Query BSON: {:?}", bson_nested_insert_query);
-//     }
-
-//     #[test]
-//     fn test_feature_query_to_mongo_output() {
-//         let less_query = FeatureQuery::Less(10);
-//         let bson_less_query = feature_query_to_mongo(&less_query);
-//         println!("Less Query BSON: {:?}", bson_less_query);
-
-//         let and_query = FeatureQuery::And(vec![
-//             FeatureQuery::MatchNum(42),
-//             FeatureQuery::MatchBool(true),
-//         ]);
-//         let bson_and_query = feature_query_to_mongo(&and_query);
-//         println!("And Query BSON: {:?}", bson_and_query);
-
-//         let nested_feature_query = FeatureQuery::Nested(
-//             Index::String("nested_field".to_string()),
-//             Box::new(FeatureQuery::MatchStr("value".to_string())),
-//         );
-//         let bson_nested_feature_query = feature_query_to_mongo(&nested_feature_query);
-//         println!("Nested Feature Query BSON: {:?}", bson_nested_feature_query);
-//     }
-
-//     #[test]
-//     fn test_query_type_to_mongo_output() {
-//         let set_query = QueryType::Set(
-//             Box::new(Ruid::from_str("00000000000000000000000000000001").unwrap()),
-//             Box::new(Ruid::from_str("00000000000000000000000000000002").unwrap()),
-//             LocationQuery::Key("field".to_string()),
-//         );
-//         let bson_set_query = query_type_to_mongo(&set_query);
-//         println!("Set Query BSON: {:?}", bson_set_query);
-
-//         let find_query = QueryType::Find(
-//             Box::new(Ruid::from_str("00000000000000000000000000000001").unwrap()),
-//             FeatureQuery::And(vec![
-//                 FeatureQuery::MatchStr("value".to_string()),
-//                 FeatureQuery::Less(100),
-//             ]),
-//         );
-//         let bson_find_query = query_type_to_mongo(&find_query);
-//         println!("Find Query BSON: {:?}", bson_find_query);
-//     }
-// }
+        stack.last().unwrap().result.as_document().unwrap().clone()
+    }
+}
