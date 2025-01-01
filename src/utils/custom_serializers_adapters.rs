@@ -1,4 +1,6 @@
-use chrono::{DateTime, NaiveDateTime, Utc};
+use base64::engine::general_purpose;
+use base64::Engine;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serializer};
 use serde_with::{DeserializeAs, SerializeAs};
 use num_traits::Num;
@@ -41,7 +43,7 @@ impl SerializeAs<Vec<u8>> for Base64 {
     where
         S: Serializer,
     {
-        let encoded = base64::encode(bytes);
+        let encoded = general_purpose::STANDARD.encode(bytes);
         serializer.serialize_str(&encoded)
     }
 }
@@ -52,7 +54,7 @@ impl<'de> DeserializeAs<'de, Vec<u8>> for Base64 {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        base64::decode(&s).map_err(serde::de::Error::custom)
+        general_purpose::STANDARD.decode(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -67,9 +69,8 @@ impl SerializeAs<i64> for TimeStamp {
         let seconds = *timestamp / 1_000;
         let nanos = (*timestamp % 1_000) * 1_000_000;
 
-        let datetime = NaiveDateTime::from_timestamp_opt(seconds, nanos as u32)
+        let datetime = DateTime::<Utc>::from_timestamp(seconds, nanos as u32)
             .ok_or_else(|| serde::ser::Error::custom("Invalid Unix timestamp"))?;
-        let datetime: DateTime<Utc> = DateTime::from_utc(datetime, Utc);
         let s = datetime.to_rfc3339();
         serializer.serialize_str(&s)
     }
