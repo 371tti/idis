@@ -1,3 +1,5 @@
+use std::os::windows::process;
+
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
 use serde_with::serde_as;
@@ -11,10 +13,20 @@ pub enum ErrMsg {
     ERROR(String),
     CRITICAL(String),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProsessType {
+    LocalApi,
+    DB,
+    StorageEngine,
+    DiskDriver,
+    OS,
+    Network,
+}
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrState {
-    pub process_num: u64,
+    pub prosess_type: ProsessType,
     pub message: Vec<ErrMsg>,
     #[serde_as(as = "TimeStamp")]
     pub timestamp: i64,
@@ -22,7 +34,7 @@ pub struct ErrState {
 }
 
 impl ErrState {
-    pub fn new(process_num: u64, parent: Option<ErrState>) -> Self {
+    pub fn new(prosess_type: ProsessType, parent: Option<ErrState>) -> Self {
         let utc_timestamp = Utc::now().timestamp_millis();
         let from = if let Some(parent_val) = parent {
             Some(Box::new(parent_val))
@@ -30,7 +42,7 @@ impl ErrState {
         let message = Vec::new();
 
         Self {
-            process_num,
+            prosess_type,
             message,
             timestamp: utc_timestamp,
             from: from,

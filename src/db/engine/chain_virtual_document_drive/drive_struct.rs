@@ -18,6 +18,10 @@ pub struct Header {
     entry_count: u64,       // Number of entries in the drive
 }
 
+impl Header {
+    pub const SIZE: usize = 72; // 72 bytes
+}
+
 pub enum CompressionMethod {
     None = 0,
     Zstd = 1,
@@ -53,6 +57,12 @@ pub struct Metadata {
     child_snapshot_version: Vec<u32>, // 子ノードのスナップショットバージョン 4m-byte
 }
 // メタデータはブロックに1つ配置していく 容量が足りなくなってきたら重なる 細断化しにくいように余裕を持たせる 必ず連続データになるようにする
+
+pub struct DataBlockList {
+    id: u128,
+    size: u64,
+    blocks: Vec<Block>,
+}
 
 pub struct Index {
     id: u128,
@@ -94,10 +104,10 @@ pub enum IndexType {
 struct FreeBlockManager {
     id: u128,
     size: u64,
-    free_blocks: Vec<FreeBlock>,
+    free_blocks: Vec<Block>,
 }
 
-struct FreeBlock {
+struct Block {
     start: u64, // 開始位置
     length: u64, // 長さ（ブロック数）
 }
