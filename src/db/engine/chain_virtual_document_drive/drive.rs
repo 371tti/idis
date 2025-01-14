@@ -54,18 +54,16 @@ impl DiskDriver {
 
         // プロデューサータスク
         let mut file = self.file.try_clone().map_err(|e| {
+            log::error!("DiskDriver Error - Failed to clone file: {:?}", e);
             ErrState::new(err_set::ProsessType::DiskDriver, None)
-                .add_message(err_set::ErrMsg::ERROR(format!(
-                    "Failed to clone file handle: {:?}",
-                    e
-                )))
+                .add_message(err_set::ErrMsg::ERROR("Failed to clone file.".to_string()))
         }).await?;
         let chunk_size = chunk_size as usize;
 
         tokio::spawn(async move {
             if let Err(e) = file.seek(SeekFrom::Start(offset)).await {
                 log::error!("Failed to seek: {:?}", e);
-                return;
+                return ;
             }
 
             let mut total_read = 0u64;
