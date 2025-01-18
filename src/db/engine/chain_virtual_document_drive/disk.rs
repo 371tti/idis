@@ -90,6 +90,8 @@ impl DiskDriver {
 
         Ok(rx)
     }
+
+    pub async fn write(
 }
 
 
