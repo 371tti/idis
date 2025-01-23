@@ -1,13 +1,10 @@
 use std::io::SeekFrom;
 
-use bytes::buf;
-use chrono::offset;
 use futures::TryFutureExt;
-use tokio::{fs::{File, OpenOptions}, io::{AsyncReadExt, AsyncSeekExt}, sync::mpsc};
+use tokio::{fs::{File, OpenOptions}, io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt}, sync::mpsc};
 
 use crate::utils::err_set::{self, ErrState};
 
-use super::drive_struct::Header;
 
 struct DiskDriver {
     file: File,
@@ -43,6 +40,11 @@ impl DiskDriver {
         Ok(Self { file, queue_size })
     }
 
+    pub fn get_queue_size(&self) -> usize {
+        self.queue_size
+    }
+
+    
     /// ファイルをキューに読み込む
     pub async fn read_to_queue(
         &mut self,
@@ -91,23 +93,43 @@ impl DiskDriver {
         Ok(rx)
     }
 
-    pub async fn write(
-}
+    pub async fn write_from_queue(
+        &mut self,
+        mut rx: mpsc::Receiver<Vec<u8>>,
+        offset: u64,
+    ) -> Result<(), ErrState> {
+        // ファイルのクローンを作成
+        let mut file = self.file.try_clone().map_err(|e| {
+            log::error!("DiskDriver Error - Failed to clone file: {:?}", e);
+            ErrState::new(err_set::ProsessType::DiskDriver, None)
+                .add_message(err_set::ErrMsg::ERROR("Failed to clone file struct.".to_string()))
+        }).await?;
+    
+        // 書き込み位置をシーク
+        file.seek(SeekFrom::Start(offset)).await.map_err(|e| {
+            log::error!("Failed to seek during write: {:?}", e);
+            ErrState::new(err_set::ProsessType::DiskDriver, None)
+                .add_message(err_set::ErrMsg::ERROR("Failed to seek during write.".to_string()))
+        })?;
+    
+        // コンシューマータスクを生成
+        tokio::spawn(async move {
+            while let Some(chunk) = rx.recv().await {
+                // チャンクをファイルに書き込む
+                if let Err(e) = file.write_all(&chunk).await {
+                    log::error!("Failed to write chunk to file: {:?}", e);
+                    break;
+                }
+            }
+    
+            // ファイルをフラッシュ
+            if let Err(e) = file.flush().await {
+                log::error!("Failed to flush file: {:?}", e);
+            }
+        });
+    
+        Ok(())
+    }
+    
 
-
-struct Driver<'a> {
-    /// デスクドライバー
-    /// brock_size分
-    /// data_bytes = 0 でblock_size分のデータを読み込む
-    data_bytes: &'a u64,
-    disk_addr: &'a u64,
-    ram_addr: &'a u64,
-    block_size: &'a u64,
-    block_num: &'a u64,
-    instruction: Instruction,
-}
-
-pub enum Instruction {
-    Load,
-    Store,
 }
