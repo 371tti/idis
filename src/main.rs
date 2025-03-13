@@ -1,5 +1,7 @@
 use std::{result, time::Instant};
 
+use idis::ton::serde::value::index;
+
 struct PowerMap {
     pub free_map: Vec<Vec<u64>>,
 }
@@ -40,9 +42,29 @@ impl PowerMap {
         Some(index)
     }
 
+    fn fill_free_block(&mut self, r_index: usize) {
+        let mut index = r_index;
+        for map in &mut self.free_map.iter_mut().rev() {
+            let c = index & 0x3f;
+            index = index >> 6;
+            map[index] |= 1 << c;
+            if map[index] != u64::MAX {
+                break;
+            } 
+        }
+    }
+
+    fn fill_free_blocks(&mut self, r_index: usize, r_len: usize) {
+        let mut index = r_index;
+        let mut len = r_len;
+        
+    }
+
+    
     fn get_map(&self) -> &Vec<u64> {
         &self.free_map.last().unwrap()
     }
+
 }
 
 /// `usize` に `log64_ceil()` を実装
@@ -67,72 +89,17 @@ fn main() {
     let mut power_map = PowerMap::new(block_num);
     println!("PowerMap を作成しました (ブロック数: {})", block_num);
 
-    let start = Instant::now();
-    match power_map.search_free_block() {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    let start = Instant::now();
-    match power_map.search_free_block() {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    let start = Instant::now();
-    match power_map.search_free_block() {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    let start = Instant::now();
-    match power_map.search_free_block() {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    let start = Instant::now();
-    match power_map.search_free_block() {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    let start = Instant::now();
-    let result = power_map.search_free_block();
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    match result {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let start = Instant::now();
-    let result = power_map.search_free_block();
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    match result {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
-    let start = Instant::now();
-    let result = power_map.search_free_block();
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    match result {
-        Some(index) => println!("空きブロックの位置: {}", index),
-        None => println!("空きブロックが見つかりませんでした"),
-    }
+
     loop {
     let start = Instant::now();
     let result = power_map.search_free_block();
     let duration = start.elapsed();
     println!("処理時間: {:?}", duration);
     match result {
-        Some(index) => println!("空きブロックの位置: {}", index),
+        Some(index) => {
+            power_map.fill_free_block(index);
+            println!("空きブロックの位置: {}", index)
+        },
         None => println!("空きブロックが見つかりませんでした"),
     }
 }
