@@ -33,6 +33,7 @@ impl PowerMap {
     fn search_free_block(&self) -> Option<usize> {
         let mut index: usize = 0;
         for map in &self.free_map {
+            println!("map_binary: {:064b}", map[index]);
             let c = (map[index] + 1).trailing_zeros() as usize;
             if c == 64 {
                 return None;
@@ -54,37 +55,38 @@ impl PowerMap {
         }
     }
 
+ 
+ 
     fn fill_free_blocks(&mut self, r_index: usize, r_len: usize) {
         let mut index = r_index;
         let mut len = r_len;
+        // 各レイヤーを下位から順に処理
         for map in &mut self.free_map.iter_mut().rev() {
-            let block_num = r_len >> 6;
-            let c = index & 0x3f;
-            index = index >> 6;
-            for i in 0..=block_num {
-                let seek = if i == 0 {
-                    c
-                } else {
-                    0
-                };
-                let mask = if len <= 64 {
-                    u64::MAX >> (64 - len) << seek
-                } else {
-                    u64::MAX << c
-                };
-                map[index + i] |= mask;
+            // １レイヤーあたりのブロック数（あらかじめ計算）
+            let block_num = (len + 63) >> 6;
+            let mut seek = index & 0x3f;
+            // 必要に応じた範囲を埋める
+            let mut i = 0;
+            while len != 0 {
+                // 最初のブロックだけはオフセット c を適用
+                let available = 64 - seek;
+                let fill_count = available.min(len);
+                let mask = u64::MAX >> (64 - fill_count) << seek;
+                map[(index >> 6) + i] |= mask;
+                // 利用可能ビット分を引く（不足なら 0 になる）
+                len = len.saturating_sub(available);
+                i += 1;
+                seek = 0;
             }
-            for i in 0..block_num {
-                if (map[index + i] + 1).trailing_zeros() as usize == 64 {
-                    index = ((index + i) >> 6) + 1;
-                    break;
-                }
-            }
-            len = 0;
-            for i in 0..block_num {
-                if (map[index + i] + 1).trailing_zeros() as usize == 64 {
-                    len += 1;
-                }
+            // 次のレイヤーの初期位置に移行
+            index >>= 6;
+            // 次レイヤーで埋まっているブロックを検索（最初に見つかった free = u64::MAX の位置へ）
+            if let Some(offset) = (0..block_num).find(|&i| map[index + i] == u64::MAX) {
+                index += offset;
+                // free のブロック数を再計算（次レイヤーで連続して free なら len を伸ばす）
+                len += (0..block_num).filter(|&i| map[index + i] == u64::MAX).count();
+            } else {
+                return;
             }
         }
     }
@@ -120,18 +122,21 @@ fn main() {
 
 
     loop {
-    let start = Instant::now();
-    let result = power_map.search_free_block();
-    let duration = start.elapsed();
-    println!("処理時間: {:?}", duration);
-    match result {
-        Some(index) => {
-            power_map.fill_free_block(index);
-            println!("空きブロックの位置: {}", index)
-        },
-        None => println!("空きブロックが見つかりませんでした"),
+        let start = Instant::now();
+        let result = power_map.search_free_block();
+        let duration = start.elapsed();
+        println!("処理時間: {:?}", duration);
+        match result {
+            Some(index) => {
+                //power_map.fill_free_block(index);
+                power_map.fill_free_blocks(index, 1000000);
+                println!("空きブロックの位置: {}", index)
+            },
+            None => println!("空きブロックが見つかりませんでした"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-}
+
     
 
     println!("=== PowerMap テスト終了 ===");
