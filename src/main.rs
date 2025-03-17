@@ -1,4 +1,4 @@
-use std::{result, time::Instant};
+use std::{backtrace, result, time::Instant, u64};
 
 use idis::ton::serde::value::index;
 
@@ -57,7 +57,36 @@ impl PowerMap {
     fn fill_free_blocks(&mut self, r_index: usize, r_len: usize) {
         let mut index = r_index;
         let mut len = r_len;
-        
+        for map in &mut self.free_map.iter_mut().rev() {
+            let block_num = r_len >> 6;
+            let c = index & 0x3f;
+            index = index >> 6;
+            for i in 0..=block_num {
+                let seek = if i == 0 {
+                    c
+                } else {
+                    0
+                };
+                let mask = if len <= 64 {
+                    u64::MAX >> (64 - len) << seek
+                } else {
+                    u64::MAX << c
+                };
+                map[index + i] |= mask;
+            }
+            for i in 0..block_num {
+                if (map[index + i] + 1).trailing_zeros() as usize == 64 {
+                    index = ((index + i) >> 6) + 1;
+                    break;
+                }
+            }
+            len = 0;
+            for i in 0..block_num {
+                if (map[index + i] + 1).trailing_zeros() as usize == 64 {
+                    len += 1;
+                }
+            }
+        }
     }
 
     
