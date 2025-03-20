@@ -30,17 +30,21 @@ impl PowerMap {
     }
 
     /// 空きブロックを検索する（見つからなければ `None`）
-    fn search_free_block(&self) -> Option<usize> {
-        let mut index: usize = 0;
+    fn search_free_block(&self) -> Option<u64> {
+        let mut index: u64 = 0;
         for map in &self.free_map {
-            println!("map_binary: {:064b}", map[index]);
-            let c = (map[index] + 1).trailing_zeros() as usize;
+            println!("map_binary: {:064b}", map[index as usize]);
+            let c = (map[index as usize] + 1).trailing_zeros() as u64;
             if c == 64 {
                 return None;
             }
             index = (index << 6) | c;
         }
         Some(index)
+    }
+
+    fn search_free_blocks(&self) -> Option<usize> {
+
     }
 
     fn fill_free_block(&mut self, r_index: usize) {
@@ -57,7 +61,7 @@ impl PowerMap {
 
  
  
-    fn fill_free_blocks(&mut self, r_index: usize, r_len: usize) {
+    fn fill_free_blocks(&mut self, r_index: u64, r_len: u64) {
         let mut index = r_index;
         let mut len = r_len;
         // 各レイヤーを下位から順に処理

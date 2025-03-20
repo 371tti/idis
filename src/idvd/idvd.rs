@@ -35,6 +35,8 @@ use tokio::io::AsyncReadExt;
 /// ---------------------
 /// id_index_pos: 64bit
 /// =====================
+/// 
+/// 
 pub struct IDVD {
     pub path: PathBuf,
     pub size: u64, // in bytes
@@ -49,14 +51,40 @@ pub struct IDVD {
     pub file: File,
 }
 
-pub struct BlockIndex {
-    pub index: Vec<MapBlockIndex>,
-    pub len: u64,
+/// 領域アロケーター
+/// ページ単位で管理
+/// ページあたりのブロック数は274,877,906,944 = 2^32 * 64
+pub struct FreeMap {
+    pub pow_map: Vec<PowMap>,
+    pub size: u64,
+}
+
+pub struct PowMap {
+    pub page: u64,
+    pub map: Vec<Vec<u64>>,
+}
+
+impl FreeMap {
+    /// map を取得する
+    /// 
+    /// # Arguments
+    /// * `deep` - ページの深さ
+    /// * `index` - ブロックのインデックス
+    pub fn map(&self, deep: usize, index: u64) -> &Vec<u64> {
+        let page = index >> (32 + deep as u64);
+        
+    }
+}
+
+/// block index の代わりにもする
+pub struct RuidIndex {
+    // ソートしておくべきかも
+    pub ruid: Vec<u128>,
+    pub value: Vec<BlockIndex>,
     // lazy load するかも
 }
 
-pub struct MapBlockIndex {
-    pub key: u64,
+pub struct BlockIndex {
     pub value: Vec<BlockIndexData>
 }
 
@@ -65,49 +93,40 @@ pub struct BlockIndexData {
     pub len: u64,
 }
 
-pub struct IDIndex {
-    // ソートしておくべきかも
-    pub index: Vec<MapIDIndex>,
-    pub len: u64,
-    // lazy load するかも
-}
-
-#[derive(Default, Clone, PartialEq)]
-pub struct MapIDIndex {
-    // ruid の addr
-    pub key: u128,
-    // FSIndex の addr
-    pub value: u64,
-}
-
 pub struct FSIndex {
-    pub r#type: u8,
-    pub referrer: u64,
+    /// ファイルのタイプフラグ
+    pub type_flag: u8,
+    /// 親ディレクトリの ruid
+    pub referrer: u128,
+    /// ファイルの ruid
     pub ruid: u128,
-    // latest access timestamp
+    /// latest access timestamp
     pub timestamp_la: u64,
-    // latest create timestamp
+    /// latest create timestamp
     pub timestamp_ct: u64,
-    // latest modify timestamp
+    /// latest modify timestamp
     pub timestamp_lm: u64,
-    // latest change timestamp(meta or perm)
+    /// latest change timestamp(meta or perm)
     pub timestamp_lc: u64,
-    // directory or file name
+    /// directory or file name
     pub name: String,
+    /// データのクラスタアドレス
     pub data_addr: u64,
-    pub links: Vec<MapFSIndex/*addr*/>,
+    pub links: FSLink,
     pub perm: FSPermission,
 }
 
-pub struct MapFSIndex {
-    pub key: u128, /*file name hash*/
-    // スナップショットの番号
-    pub back_num: u64,
-    pub addr: u64,
+/// Struct of Array で実装
+pub struct FSLink {
+    /// ファイル名のハッシュ値
+    /// ローカルハッシュから作成
+    pub hash: Vec<u128>,
+    /// ファイルのruid
+    pub ruid: Vec<u128>,
 }
 
+/// Struct of Array で実装
 pub struct FSPermission {
-    /// Struct of Array で実装
     pub ruid: Vec<u128>,
     pub flag_map: Vec<u8>,
 }
