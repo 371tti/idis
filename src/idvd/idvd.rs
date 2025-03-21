@@ -2,6 +2,7 @@ use std::fs::Permissions;
 use std::path::PathBuf;
 
 use rand::rngs::OsRng;
+use rand::seq::index;
 use rand::TryRngCore;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
@@ -55,24 +56,93 @@ pub struct IDVD {
 /// ページ単位で管理
 /// ページあたりのブロック数は274,877,906,944 = 2^32 * 64
 pub struct FreeMap {
-    pub pow_map: Vec<PowMap>,
+    /// bit map
+    /// page > (hi_layer - lo_layer)
+    /// 連続領域でtree map を構築
+    pub pow_map: Vec<Vec<u64>>,
+    /// ブロック数
     pub size: u64,
-}
-
-pub struct PowMap {
-    pub page: u64,
-    pub map: Vec<Vec<u64>>,
+    /// レイヤー数
+    pub layer_num: usize,
 }
 
 impl FreeMap {
-    /// map を取得する
+    pub fn new(size: u64) -> Self {
+        let layer_num = size.log64_ceil();
+        let mut raw_size: u64 = 0;
+        for i in 0..layer_num {
+            raw_size += size >> (i * 6);
+        }
+        let page_num = (raw_size + 0xFFFF_FFFE) >> 32;
+        let raw_size_mod = raw_size & 0xFFFF_FFFF;
+        let mut pow_map: Vec<Vec<u64>> = Vec::with_capacity(page_num as usize);
+        for i in 0..page_num {
+            let capacity = if i == page_num - 1 {
+            raw_size_mod as usize
+            } else {
+            0xFFFF_FFFF as usize
+            };
+            pow_map.push(vec![0; capacity]);
+        }
+        FreeMap { pow_map, size, layer_num }
+    }
+
+    /// ある深さのindexの要素を取得する
+    /// indexはu64
+    /// 内部でu32のrangeで分割
     /// 
     /// # Arguments
     /// * `deep` - ページの深さ
     /// * `index` - ブロックのインデックス
-    pub fn map(&self, deep: usize, index: u64) -> &Vec<u64> {
-        let page = index >> (32 + deep as u64);
-        
+    #[inline(always)]
+    pub fn c(&self, deep: usize, index: u64) -> u64 {
+        const U32MASK: usize = 0xFFFF_FFFF;
+        // bitmap のオフセットを計算
+        // ブロック数がu64::MAXに近い場合、mapのほうがドライブ容量より
+        // 大きくなってしまうのでオーバーフローは発生しえない
+        let offset = self.precomputed_offset(deep);
+        let page: usize = ((offset + index) >> 32) as usize;
+        let index: usize = (offset + index) as usize & U32MASK;
+        self.pow_map[page][index]
+    }
+
+    #[inline(always)]
+    fn precomputed_offset(&self, deep: usize) -> u64 {
+        let mut offset: u64 = 0;
+        for i in 0..deep {
+            offset += self.size >> (i * 6);
+        }
+        offset
+    }
+
+    #[inline(always)]
+    pub fn search_free_block(&self) -> Option<u64> {
+        let mut index: u64 = 0;
+        for i in (0..self.layer_num).rev() {
+            println!("map_binary: {:064b}", self.c(i, index));
+            let c = (self.c(i, index) + 1).trailing_zeros() as u64;
+            if c == 64 {
+                return None;
+            }
+            index = (index << 6) | c;
+        }
+        Some(index)
+    }
+}
+
+
+/// `u64` に `log64_ceil()` を実装
+trait Log64Ext {
+    fn log64_ceil(self) -> usize;
+}
+
+impl Log64Ext for u64 {
+    fn log64_ceil(self) -> usize {
+        if self <= 1 {
+            return 1;
+        }
+        let log = self.ilog(64);
+        log as usize + ((self > 64u64.pow(log)) as usize)
     }
 }
 

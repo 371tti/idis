@@ -1,147 +1,159 @@
-use std::{backtrace, result, time::Instant, u64};
-
-use idis::ton::serde::value::index;
-
-struct PowerMap {
-    pub free_map: Vec<Vec<u64>>,
+/// 領域アロケーター
+/// ページ単位で管理
+/// ページあたりのブロック数は274,877,906,944 = 2^32 * 64
+pub struct FreeMap {
+    /// bit map
+    /// page > (hi_layer - lo_layer)
+    /// 連続領域でtree map を構築
+    pub pow_map: Vec<Vec<u64>>,
+    /// ブロック数
+    pub size: u64,
+    /// レイヤー数
+    pub layer_num: usize,
 }
 
-impl PowerMap {
-    fn new(block_num: usize) -> Self {
-        let layer_num = block_num.log64_ceil();
-        let mut map = Vec::with_capacity(layer_num);
-        let mut this_layer_num = block_num;
-
-        for _ in 0..layer_num {
-            let rem = this_layer_num % 64;
-            this_layer_num = this_layer_num / 64 + (rem > 0) as usize;
-            let mut layer = Vec::with_capacity(this_layer_num);
-            for _ in 0..this_layer_num {
-                layer.push(0);
+impl FreeMap {
+    pub fn new(r_size: u64) -> Self {
+        let mut pow_map = Vec::new();
+        // レイヤー数を計算
+        let layer_num = r_size.log64_ceil();
+        let mut size = r_size;
+        // レイヤーごとに処理
+        for i in 0..layer_num {
+            // レイヤーのサイズとあまりを計算
+            let layer_mode = size & 0x3F;
+            let layer_size = (size + 0x3F) >> 6;
+            // pageのサイズを計算
+            let page_mod = layer_size & 0xFFFF_FFFF;
+            let page_size = (layer_size + 0xFFFF_FFFE) >> 32;
+            println!("layer_size: {}, page_size: {}", layer_size, page_size);
+            // ページごとに処理
+            for j in 0..page_size {
+                if j == page_size - 1 {
+                    let mut page = Vec::new();
+                    // 最後のページの場合 あまり数で埋める
+                    for k in 0..page_mod {
+                        if k == page_mod - 1 {
+                            // 最後のブロックの場合 あまり数で埋める
+                            println!("layer_mode: {}", layer_mode);
+                            let mask = u64::MAX << layer_mode;
+                            page.push(mask);
+                        } else {
+                            page.push(0);
+                        } 
+                    } 
+                    pow_map.push(page);
+                } else {
+                    pow_map.push(vec![0; 0xFFFF_FFFF]);
+                }
             }
-            if rem > 0 {
-                *layer.last_mut().unwrap() = !0u64 << rem;
-            }
-            map.push(layer);
+            size >>= 6;
         }
-        map.reverse();
-
-        Self { free_map: map }
+        FreeMap { pow_map, size: r_size, layer_num }
     }
 
-    /// 空きブロックを検索する（見つからなければ `None`）
-    fn search_free_block(&self) -> Option<u64> {
-        let mut index: u64 = 0;
-        for map in &self.free_map {
-            println!("map_binary: {:064b}", map[index as usize]);
-            let c = (map[index as usize] + 1).trailing_zeros() as u64;
+    /// ある深さのindexの要素を取得する
+    /// indexはu64
+    /// 内部でu32のrangeで分割
+    /// 
+    /// # Arguments
+    /// * `deep` - ページの深さ
+    /// * `index` - ブロックのインデックス
+    #[inline(always)]
+    pub fn c(&mut self, deep: usize, index: u64) -> &mut u64 {
+        println!("deep: {}, index: {}", deep, index);
+        const U32MASK: usize = 0xFFFF_FFFF;
+      
+        let offset = self.precomputed_offset(deep);
+        let page: usize = ((offset + index) >> 32) as usize;
+        let index: usize = (offset + index) as usize & U32MASK;
+        println!("page: {}, index: {}", page, index);
+        &mut self.pow_map[page][index]
+    }
+
+    #[inline(always)]
+    fn precomputed_offset(&self, deep: usize) -> u64 {
+        let mut offset: u64 = 0;
+        for i in 0..deep {
+            offset += (self.size + ((1u64 << (i * 6)) - 1)) >> (i * 6);
+        }
+        offset
+    }
+
+    #[inline(always)]
+    pub fn search_free_block(&mut self) -> Option<u64> {
+        let mut block_index: u64 = 0;
+        for i in (0..self.layer_num).rev() {
+            println!("i: {}", i);
+            println!("map_binary: {:064b}", self.c(i, block_index));
+            let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
             if c == 64 {
                 return None;
             }
-            index = (index << 6) | c;
+            block_index = (block_index << 6) | c;
         }
-        Some(index)
+        Some(block_index)
     }
 
-    fn search_free_blocks(&self) -> Option<usize> {
-
-    }
-
-    fn fill_free_block(&mut self, r_index: usize) {
-        let mut index = r_index;
-        for map in &mut self.free_map.iter_mut().rev() {
-            let c = index & 0x3f;
-            index = index >> 6;
-            map[index] |= 1 << c;
-            if map[index] != u64::MAX {
+    pub fn fill_free_block(&mut self, block_index: u64) {
+        let mut index = block_index >> 6;
+        let mut mode = block_index & 0x3F;
+        for i in 0..self.layer_num {
+            let c = self.c(i, index);
+            *c |= 1 << mode;
+            if *c != u64::MAX {
                 break;
-            } 
-        }
-    }
-
- 
- 
-    fn fill_free_blocks(&mut self, r_index: u64, r_len: u64) {
-        let mut index = r_index;
-        let mut len = r_len;
-        // 各レイヤーを下位から順に処理
-        for map in &mut self.free_map.iter_mut().rev() {
-            // １レイヤーあたりのブロック数（あらかじめ計算）
-            let block_num = (len + 63) >> 6;
-            let mut seek = index & 0x3f;
-            // 必要に応じた範囲を埋める
-            let mut i = 0;
-            while len != 0 {
-                // 最初のブロックだけはオフセット c を適用
-                let available = 64 - seek;
-                let fill_count = available.min(len);
-                let mask = u64::MAX >> (64 - fill_count) << seek;
-                map[(index >> 6) + i] |= mask;
-                // 利用可能ビット分を引く（不足なら 0 になる）
-                len = len.saturating_sub(available);
-                i += 1;
-                seek = 0;
             }
-            // 次のレイヤーの初期位置に移行
+            mode = index & 0x3F;
             index >>= 6;
-            // 次レイヤーで埋まっているブロックを検索（最初に見つかった free = u64::MAX の位置へ）
-            if let Some(offset) = (0..block_num).find(|&i| map[index + i] == u64::MAX) {
-                index += offset;
-                // free のブロック数を再計算（次レイヤーで連続して free なら len を伸ばす）
-                len += (0..block_num).filter(|&i| map[index + i] == u64::MAX).count();
-            } else {
-                return;
-            }
         }
     }
-
-    
-    fn get_map(&self) -> &Vec<u64> {
-        &self.free_map.last().unwrap()
-    }
-
 }
 
-/// `usize` に `log64_ceil()` を実装
+
+/// `u64` に `log64_ceil()` を実装
 trait Log64Ext {
     fn log64_ceil(self) -> usize;
 }
 
-impl Log64Ext for usize {
+impl Log64Ext for u64 {
     fn log64_ceil(self) -> usize {
         if self <= 1 {
             return 1;
         }
         let log = self.ilog(64);
-        log as usize + ((self > 64usize.pow(log)) as usize)
+        log as usize + ((self > 64u64.pow(log)) as usize)
     }
 }
 
+use std::time::Instant;
+
 fn main() {
-    println!("=== PowerMap テスト開始 ===");
+    // FreeMap のテスト開始
+    println!("=== FreeMap テスト開始 ===");
 
-    let block_num = 62_500_000;
-    let mut power_map = PowerMap::new(block_num);
-    println!("PowerMap を作成しました (ブロック数: {})", block_num);
-
+    // FreeMap の初期化
+    let size: u64 = 90129301; // 64GB のブロックサイズを仮定
+    let mut free_map = FreeMap::new(size);
+    println!("FreeMap を作成しました (サイズ: {} bytes)", size);
 
     loop {
-        let start = Instant::now();
-        let result = power_map.search_free_block();
-        let duration = start.elapsed();
-        println!("処理時間: {:?}", duration);
-        match result {
-            Some(index) => {
-                //power_map.fill_free_block(index);
-                power_map.fill_free_blocks(index, 1000000);
-                println!("空きブロックの位置: {}", index)
-            },
-            None => println!("空きブロックが見つかりませんでした"),
+    // 空きブロックを検索
+    let start = Instant::now();
+    match free_map.search_free_block() {
+        Some(index) => {
+            let duration = start.elapsed();
+            println!("空きブロックが見つかりました: {}", index);
+            println!("処理時間: {:?}", duration);
+            
+            free_map.fill_free_block(index);
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        None => {
+            let duration = start.elapsed();
+            println!("空きブロックが見つかりませんでした");
+            println!("処理時間: {:?}", duration);
+        }
     }
-
-    
-
-    println!("=== PowerMap テスト終了 ===");
+}
+    println!("=== FreeMap テスト終了 ===");
 }
