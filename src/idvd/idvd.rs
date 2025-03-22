@@ -1,13 +1,10 @@
-use std::fs::Permissions;
 use std::path::PathBuf;
 
 use rand::rngs::OsRng;
-use rand::seq::index;
 use rand::TryRngCore;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufWriter;
-use std::io::Read;
 
 use super::error::IDVDError;
 use tokio::fs::OpenOptions;
@@ -16,33 +13,12 @@ use tokio::io::AsyncReadExt;
 
 
 /// IDIS Virtual Disk(IDVD) format
-/// structure
-/// =====================
-/// padding: 64 - 8 bit
-/// ---------------------
-/// vd_version: 8bit
-/// ---------------------
-/// vd_gen: 64bit
-/// ---------------------
-/// hash_seed: 64bit
-/// ---------------------
-/// block_size: 64bit
-/// ---------------------
-/// size: 64bit
-/// ---------------------
-/// block_index_pos: 64bit
-/// ---------------------
-/// fs_pos: 64bit
-/// ---------------------
-/// id_index_pos: 64bit
-/// =====================
-/// 
-/// 
 pub struct IDVD {
     pub path: PathBuf,
     pub size: u64, // in bytes
     pub block_size: u64, // in bytes
-    pub block_index_pos: u64, // in blocks
+    pub bitmap_pos: u64, // in blocks
+    pub cluster_index_pos: u64, // in blocks
     pub fs_index_addr: u64, // in blocks
     pub id_index_addr: u64, // in blocks
     pub vd_gen: u64, // snapshot number
@@ -67,24 +43,60 @@ pub struct FreeMap {
 }
 
 impl FreeMap {
-    pub fn new(size: u64) -> Self {
-        let layer_num = size.log64_ceil();
-        let mut raw_size: u64 = 0;
-        for i in 0..layer_num {
-            raw_size += size >> (i * 6);
+    pub const PAGE_CAPACITY: usize = 0x03FF_FFFF as usize;
+    pub const PAGE_SHIFT: usize = 26;
+    /// FreeMap を初期化する
+    pub fn new(r_size: u64) -> Self {
+        // レイヤー数を計算
+        let layer_num = r_size.log64_ceil();
+    
+        // 1回目のループで、全レイヤーのブロック総数を算出
+        let mut total_blocks: u64 = 0;
+        let mut size = r_size;
+        for _ in 0..layer_num {
+            let layer_size = (size + 0x3E) >> 6;
+            total_blocks += layer_size;
+            size = layer_size;
         }
-        let page_num = (raw_size + 0xFFFF_FFFE) >> 32;
-        let raw_size_mod = raw_size & 0xFFFF_FFFF;
-        let mut pow_map: Vec<Vec<u64>> = Vec::with_capacity(page_num as usize);
-        for i in 0..page_num {
-            let capacity = if i == page_num - 1 {
-            raw_size_mod as usize
-            } else {
-            0xFFFF_FFFF as usize
-            };
-            pow_map.push(vec![0; capacity]);
+        let total_pages = ((total_blocks as usize) + Self::PAGE_CAPACITY - 1) / Self::PAGE_CAPACITY;
+    
+        // 外側のベクタ、つまりページの容量を指定して初期化
+        let mut pow_map: Vec<Vec<u64>> = Vec::with_capacity(total_pages);
+        // 1ページ目も内側ベクタの容量を予約して初期化
+        pow_map.push(Vec::with_capacity(Self::PAGE_CAPACITY));
+        let mut now_page = 0;
+    
+        // 2回目のループで、実際のブロックを設定
+        size = r_size;
+        for _layer in 0..layer_num {
+            let layer_mode = size & 0x3F;
+            let layer_size = (size + 0x3E) >> 6;
+            let mut blocks_remaining = layer_size;
+            let mut block_index: u64 = 0;
+    
+            while blocks_remaining > 0 {
+                let current_capacity = Self::PAGE_CAPACITY - pow_map[now_page].len();
+                if current_capacity == 0 {
+                    now_page += 1;
+                    pow_map.push(Vec::with_capacity(Self::PAGE_CAPACITY));
+                    continue;
+                }
+                let to_push = std::cmp::min(blocks_remaining as usize, current_capacity);
+                for j in 0..to_push {
+                    if block_index + j as u64 == layer_size - 1 {
+                        pow_map[now_page].push(!0u64 << layer_mode);
+                    } else {
+                        pow_map[now_page].push(0);
+                    }
+                }
+                blocks_remaining -= to_push as u64;
+                block_index += to_push as u64;
+            }
+            size = layer_size;
         }
-        FreeMap { pow_map, size, layer_num }
+    
+        println!("layer_num: {}", layer_num);
+        FreeMap { pow_map, size: r_size, layer_num }
     }
 
     /// ある深さのindexの要素を取得する
@@ -95,41 +107,54 @@ impl FreeMap {
     /// * `deep` - ページの深さ
     /// * `index` - ブロックのインデックス
     #[inline(always)]
-    pub fn c(&self, deep: usize, index: u64) -> u64 {
-        const U32MASK: usize = 0xFFFF_FFFF;
-        // bitmap のオフセットを計算
-        // ブロック数がu64::MAXに近い場合、mapのほうがドライブ容量より
-        // 大きくなってしまうのでオーバーフローは発生しえない
+    pub fn c(&mut self, deep: usize, index: u64) -> &mut u64 {
         let offset = self.precomputed_offset(deep);
-        let page: usize = ((offset + index) >> 32) as usize;
-        let index: usize = (offset + index) as usize & U32MASK;
-        self.pow_map[page][index]
+        let raw_index = offset + index;
+        let page: usize = (raw_index >> Self::PAGE_SHIFT) as usize;
+        let index: usize = raw_index as usize & Self::PAGE_CAPACITY;
+        &mut self.pow_map[page][index]
     }
 
+    /// ある深さのlayerが始まるindexを取得する
     #[inline(always)]
     fn precomputed_offset(&self, deep: usize) -> u64 {
+        let mut size = self.size;
         let mut offset: u64 = 0;
-        for i in 0..deep {
-            offset += self.size >> (i * 6);
+        for _ in 0..deep {
+            size = (size + 0x3E) >> 6;
+            offset += size
         }
         offset
     }
 
     #[inline(always)]
-    pub fn search_free_block(&self) -> Option<u64> {
-        let mut index: u64 = 0;
+    pub fn search_free_block(&mut self) -> Option<u64> {
+        let mut block_index: u64 = 0;
         for i in (0..self.layer_num).rev() {
-            println!("map_binary: {:064b}", self.c(i, index));
-            let c = (self.c(i, index) + 1).trailing_zeros() as u64;
+            println!("map_binary: {:064b}", self.c(i, block_index));
+            let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
             if c == 64 {
                 return None;
             }
-            index = (index << 6) | c;
+            block_index = (block_index << 6) | c;
         }
-        Some(index)
+        Some(block_index)
+    }
+
+    pub fn fill_free_block(&mut self, block_index: u64) {
+        let mut index = block_index >> 6;
+        let mut mode = block_index & 0x3F;
+        for i in 0..self.layer_num {
+            let c = self.c(i, index);
+            *c |= 1 << mode;
+            if *c != u64::MAX {
+                break;
+            }
+            mode = index & 0x3F;
+            index >>= 6;
+        }
     }
 }
-
 
 /// `u64` に `log64_ceil()` を実装
 trait Log64Ext {
@@ -323,124 +348,124 @@ impl FSPermissions {
     }
 }
 
-impl IDVD {
-    pub async fn load(path: &PathBuf) -> Result<Self, IDVDError> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(false)
-            .open(path)
-            .await
-            .map_err(|_| IDVDError::VDNotFound)?;
+// impl IDVD {
+//     pub async fn load(path: &PathBuf) -> Result<Self, IDVDError> {
+//         let mut file = OpenOptions::new()
+//             .read(true)
+//             .write(true)
+//             .create(false)
+//             .open(path)
+//             .await
+//             .map_err(|_| IDVDError::VDNotFound)?;
 
-        let mut buf = [0u8; 64];
-        file.read_exact(&mut buf)
-            .await
-            .map_err(|_| IDVDError::InvalidFormat)?;
+//         let mut buf = [0u8; 64];
+//         file.read_exact(&mut buf)
+//             .await
+//             .map_err(|_| IDVDError::InvalidFormat)?;
 
-        let vd_version = buf[7] as u8;
-        if vd_version != 1 {
-            return Err(IDVDError::NotSupportedVersion);
-        }
+//         let vd_version = buf[7] as u8;
+//         if vd_version != 1 {
+//             return Err(IDVDError::NotSupportedVersion);
+//         }
 
-        let vd_gen = u64::from_le_bytes(buf[8..16].try_into().unwrap());
-        let hash_seed = u64::from_le_bytes(buf[16..24].try_into().unwrap());
-        let block_size = u64::from_le_bytes(buf[24..32].try_into().unwrap());
-        let size = u64::from_le_bytes(buf[32..40].try_into().unwrap());
-        let block_index_pos = u64::from_le_bytes(buf[40..48].try_into().unwrap());
-        let fs_index_addr = u64::from_le_bytes(buf[48..56].try_into().unwrap());
-        let id_index_addr = u64::from_le_bytes(buf[56..64].try_into().unwrap());
+//         let vd_gen = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+//         let hash_seed = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+//         let block_size = u64::from_le_bytes(buf[24..32].try_into().unwrap());
+//         let size = u64::from_le_bytes(buf[32..40].try_into().unwrap());
+//         let block_index_pos = u64::from_le_bytes(buf[40..48].try_into().unwrap());
+//         let fs_index_addr = u64::from_le_bytes(buf[48..56].try_into().unwrap());
+//         let id_index_addr = u64::from_le_bytes(buf[56..64].try_into().unwrap());
 
-        Ok(Self {
-            path: path.clone(),
-            size,
-            block_size,
-            block_index_pos,
-            fs_index_addr,
-            id_index_addr,
-            vd_gen,
-            vd_version,
-            hash_seed,
-            file,
-        })
-    }
+//         Ok(Self {
+//             path: path.clone(),
+//             size,
+//             block_size,
+//             block_index_pos,
+//             fs_index_addr,
+//             id_index_addr,
+//             vd_gen,
+//             vd_version,
+//             hash_seed,
+//             file,
+//         })
+//     }
 
-    pub async fn new(path: &PathBuf, size: u64, block_size: u64) -> Result<Self, IDVDError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)
-            .await
-            .map_err(|_| IDVDError::OSPermissionDenied)?;
+//     pub async fn new(path: &PathBuf, size: u64, block_size: u64) -> Result<Self, IDVDError> {
+//         let file = OpenOptions::new()
+//             .read(true)
+//             .write(true)
+//             .create(true)
+//             .open(path)
+//             .await
+//             .map_err(|_| IDVDError::OSPermissionDenied)?;
 
-        let block_index_pos: u64 = 1;
-        let fs_index_addr: u64 = 1;
-        let id_index_addr: u64 = 0;
-        let mut rng = OsRng;
-        let hash_seed = rng
-            .try_next_u64()
-            .map_err(|_| IDVDError::FiledGetOsRng)?;
-        let vd_version: u8 = 0;
-        let vd_gen: u64 = 0;
+//         let block_index_pos: u64 = 1;
+//         let fs_index_addr: u64 = 1;
+//         let id_index_addr: u64 = 0;
+//         let mut rng = OsRng;
+//         let hash_seed = rng
+//             .try_next_u64()
+//             .map_err(|_| IDVDError::FiledGetOsRng)?;
+//         let vd_version: u8 = 0;
+//         let vd_gen: u64 = 0;
 
-        Ok(Self {
-            path: path.clone(),
-            size,
-            block_size,
-            block_index_pos,
-            fs_index_addr,
-            id_index_addr,
-            vd_gen,
-            vd_version,
-            hash_seed,
-            file,
-        })
-    }
+//         Ok(Self {
+//             path: path.clone(),
+//             size,
+//             block_size,
+//             block_index_pos,
+//             fs_index_addr,
+//             id_index_addr,
+//             vd_gen,
+//             vd_version,
+//             hash_seed,
+//             file,
+//         })
+//     }
 
-    pub fn size(&self) -> u64 {
-        self.size
-    }
+//     pub fn size(&self) -> u64 {
+//         self.size
+//     }
 
-    pub fn block_size(&self) -> u64 {
-        self.block_size
-    }
+//     pub fn block_size(&self) -> u64 {
+//         self.block_size
+//     }
 
-    pub fn block_index_pos(&self) -> u64 {
-        self.block_index_pos
-    }
+//     pub fn block_index_pos(&self) -> u64 {
+//         self.block_index_pos
+//     }
 
-    pub async fn seek(&mut self, pos: u64) -> Result<(), IDVDError> {
-        self.file
-            .seek(std::io::SeekFrom::Start(pos))
-            .await
-            .map(|_| ())
-            .map_err(|_| IDVDError::OSPermissionDenied)
-    }
+//     pub async fn seek(&mut self, pos: u64) -> Result<(), IDVDError> {
+//         self.file
+//             .seek(std::io::SeekFrom::Start(pos))
+//             .await
+//             .map(|_| ())
+//             .map_err(|_| IDVDError::OSPermissionDenied)
+//     }
 
-    pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IDVDError> {
-        self.file
-            .read(buf)
-            .await
-            .map_err(|_| IDVDError::OSPermissionDenied)
-    }
+//     pub async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IDVDError> {
+//         self.file
+//             .read(buf)
+//             .await
+//             .map_err(|_| IDVDError::OSPermissionDenied)
+//     }
 
-    pub fn file(&mut self) -> &mut File {
-        &mut self.file
-    }
+//     pub fn file(&mut self) -> &mut File {
+//         &mut self.file
+//     }
 
-    pub fn buf_write(&mut self) -> BufWriter<&mut File> {
-        BufWriter::new(self.file())
-    }
+//     pub fn buf_write(&mut self) -> BufWriter<&mut File> {
+//         BufWriter::new(self.file())
+//     }
 
-    pub async fn write(&mut self, buf: &[u8]) -> Result<usize, IDVDError> {
-        self.file
-            .write(buf)
-            .await
-            .map_err(|_| IDVDError::OSPermissionDenied)
-    }
+//     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, IDVDError> {
+//         self.file
+//             .write(buf)
+//             .await
+//             .map_err(|_| IDVDError::OSPermissionDenied)
+//     }
 
-    pub fn resize(&mut self, add_size: u64) {
-        self.size += add_size;
-    }
-}
+//     pub fn resize(&mut self, add_size: u64) {
+//         self.size += add_size;
+//     }
+// }

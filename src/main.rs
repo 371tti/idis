@@ -13,42 +13,38 @@ pub struct FreeMap {
 }
 
 impl FreeMap {
+    pub const PAGE_CAPACITY: usize = 0x03FF_FFFF as usize;
+    pub const PAGE_SHIFT: usize = 26;
+    /// FreeMap を初期化する
     pub fn new(r_size: u64) -> Self {
-        let mut pow_map = Vec::new();
+        let mut pow_map: Vec<Vec<u64>> = Vec::new();
         // レイヤー数を計算
         let layer_num = r_size.log64_ceil();
         let mut size = r_size;
+    
+        let mut now_page = 0;
+        pow_map.push(Vec::new());
         // レイヤーごとに処理
-        for i in 0..layer_num {
+        for _ in 0..layer_num {
             // レイヤーのサイズとあまりを計算
             let layer_mode = size & 0x3F;
-            let layer_size = (size + 0x3F) >> 6;
-            // pageのサイズを計算
-            let page_mod = layer_size & 0xFFFF_FFFF;
-            let page_size = (layer_size + 0xFFFF_FFFE) >> 32;
-            println!("layer_size: {}, page_size: {}", layer_size, page_size);
-            // ページごとに処理
-            for j in 0..page_size {
-                if j == page_size - 1 {
-                    let mut page = Vec::new();
-                    // 最後のページの場合 あまり数で埋める
-                    for k in 0..page_mod {
-                        if k == page_mod - 1 {
-                            // 最後のブロックの場合 あまり数で埋める
-                            println!("layer_mode: {}", layer_mode);
-                            let mask = u64::MAX << layer_mode;
-                            page.push(mask);
-                        } else {
-                            page.push(0);
-                        } 
-                    } 
-                    pow_map.push(page);
+            let layer_size = (size + 0x3E) >> 6;
+            for i in 0..layer_size {
+                if pow_map[now_page].len() == Self::PAGE_CAPACITY {
+                    now_page += 1;
+                    pow_map.push(Vec::new());
                 } else {
-                    pow_map.push(vec![0; 0xFFFF_FFFF]);
+                    if i == layer_size - 1 {
+                        pow_map[now_page].push(!0u64 << layer_mode);
+                    } else {
+                        pow_map[now_page].push(0);
+                    }
                 }
             }
-            size >>= 6;
+            
+            size = layer_size;
         }
+        println!("layer_num: {}", layer_num);
         FreeMap { pow_map, size: r_size, layer_num }
     }
 
@@ -61,21 +57,21 @@ impl FreeMap {
     /// * `index` - ブロックのインデックス
     #[inline(always)]
     pub fn c(&mut self, deep: usize, index: u64) -> &mut u64 {
-        println!("deep: {}, index: {}", deep, index);
-        const U32MASK: usize = 0xFFFF_FFFF;
-      
         let offset = self.precomputed_offset(deep);
-        let page: usize = ((offset + index) >> 32) as usize;
-        let index: usize = (offset + index) as usize & U32MASK;
-        println!("page: {}, index: {}", page, index);
+        let raw_index = offset + index;
+        let page: usize = (raw_index >> Self::PAGE_SHIFT) as usize;
+        let index: usize = raw_index as usize & Self::PAGE_CAPACITY;
         &mut self.pow_map[page][index]
     }
 
+    /// ある深さのlayerが始まるindexを取得する
     #[inline(always)]
     fn precomputed_offset(&self, deep: usize) -> u64 {
+        let mut size = self.size;
         let mut offset: u64 = 0;
-        for i in 0..deep {
-            offset += (self.size + ((1u64 << (i * 6)) - 1)) >> (i * 6);
+        for _ in 0..deep {
+            size = (size + 0x3E) >> 6;
+            offset += size
         }
         offset
     }
@@ -84,8 +80,6 @@ impl FreeMap {
     pub fn search_free_block(&mut self) -> Option<u64> {
         let mut block_index: u64 = 0;
         for i in (0..self.layer_num).rev() {
-            println!("i: {}", i);
-            println!("map_binary: {:064b}", self.c(i, block_index));
             let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
             if c == 64 {
                 return None;
@@ -95,6 +89,21 @@ impl FreeMap {
         Some(block_index)
     }
 
+    #[inline(always)]
+    pub fn search_free_blocks(&mut self, block_num: u64) -> Option<u64> {
+        let layer = block_num.log64_ceil();
+        let mut block_index: u64 = 0;
+        for i in (0..self.layer_num).rev() {
+            let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
+            if c == 64 {
+                return None;
+            }
+            block_index = (block_index << 6) | c;
+        }
+        Some(block_index)
+    }
+
+    #[inline(always)]
     pub fn fill_free_block(&mut self, block_index: u64) {
         let mut index = block_index >> 6;
         let mut mode = block_index & 0x3F;
@@ -109,7 +118,6 @@ impl FreeMap {
         }
     }
 }
-
 
 /// `u64` に `log64_ceil()` を実装
 trait Log64Ext {
@@ -133,7 +141,7 @@ fn main() {
     println!("=== FreeMap テスト開始 ===");
 
     // FreeMap の初期化
-    let size: u64 = 90129301; // 64GB のブロックサイズを仮定
+    let size: u64 = 16_000_000_000; // 64GB のブロックサイズを仮定
     let mut free_map = FreeMap::new(size);
     println!("FreeMap を作成しました (サイズ: {} bytes)", size);
 
@@ -145,7 +153,9 @@ fn main() {
             let duration = start.elapsed();
             println!("空きブロックが見つかりました: {}", index);
             println!("処理時間: {:?}", duration);
-            
+            let block_num = 65;
+            let log_result = block_num.log64_ceil();
+            println!("log64_ceilの結果: {}", log_result);
             free_map.fill_free_block(index);
         }
         None => {
