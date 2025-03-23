@@ -80,7 +80,7 @@ impl FreeMap {
     pub fn search_free_block(&mut self) -> Option<u64> {
         let mut block_index: u64 = 0;
         for i in (0..self.layer_num).rev() {
-            let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
+            let c = (*self.c(i, block_index)).trailing_ones() as u64;
             if c == 64 {
                 return None;
             }
@@ -90,17 +90,14 @@ impl FreeMap {
     }
 
     #[inline(always)]
-    pub fn search_free_blocks(&mut self, block_num: u64) -> Option<u64> {
-        let layer = block_num.log64_ceil();
-        let mut block_index: u64 = 0;
-        for i in (0..self.layer_num).rev() {
-            let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
-            if c == 64 {
-                return None;
-            }
-            block_index = (block_index << 6) | c;
+    pub fn search_free_blocks(&mut self, r_block_num: u64) -> Option<u64> {
+        let mut need_block_num_as_layer = [0u64; 16];
+        let mut block_num = r_block_num;
+        for i in 0..self.layer_num {
+            need_block_num_as_layer[i] = block_num;
+            block_num = (block_num + 0x3E) >> 6;
         }
-        Some(block_index)
+
     }
 
     #[inline(always)]
@@ -153,9 +150,6 @@ fn main() {
             let duration = start.elapsed();
             println!("空きブロックが見つかりました: {}", index);
             println!("処理時間: {:?}", duration);
-            let block_num = 65;
-            let log_result = block_num.log64_ceil();
-            println!("log64_ceilの結果: {}", log_result);
             free_map.fill_free_block(index);
         }
         None => {
