@@ -97,7 +97,10 @@ impl FreeMap {
             need_block_num_as_layer[i] = block_num;
             block_num = (block_num + 0x3E) >> 6;
         }
+        let mut deep = self.layer_num - 1;
+        loop {
 
+        }
     }
 
     #[inline(always)]
