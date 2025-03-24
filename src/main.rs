@@ -98,8 +98,21 @@ impl FreeMap {
             block_num = (block_num + 0x3E) >> 6;
         }
         let mut deep = self.layer_num - 1;
+        let mut index = 0;
+        let mut count = 0;
         loop {
-
+            let c = self.c(deep, index);
+            let need_count = need_block_num_as_layer[deep];
+            for i in 0..64 {
+                if *c >> i & 1 == 0 {
+                    count += 1;
+                    if count == need_count {
+                        return Some(index);
+                    }
+                } else {
+                    count = 0;
+                }
+            }
         }
     }
 
