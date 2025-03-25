@@ -90,6 +90,7 @@ impl FreeMap {
     }
 
     #[inline(always)]
+    /// 空ブロックがなかったときの終了がない
     pub fn search_free_blocks(&mut self, r_block_num: u64) -> Option<u64> {
         let mut need_block_num_as_layer = [0u64; 16];
         let mut block_num = r_block_num;
@@ -98,21 +99,28 @@ impl FreeMap {
             block_num = (block_num + 0x3E) >> 6;
         }
         let mut deep = self.layer_num - 1;
-        let mut index = 0;
+        let mut indices = [0u64; 16];
         let mut count = 0;
         loop {
-            let c = self.c(deep, index);
-            let need_count = need_block_num_as_layer[deep];
-            for i in 0..64 {
-                if *c >> i & 1 == 0 {
-                    count += 1;
-                    if count == need_count {
-                        return Some(index);
+            let index = &mut indices[deep];
+            let mode = *index & 0x3F;
+            let chunk_index = *index >> 6;
+            let chunk = self.c(deep, chunk_index);
+            let bit = (*chunk >> mode) & 1;
+            if bit == 0 {
+                count += 1;
+                if count == need_block_num_as_layer[deep] {
+                    if deep == 0 {
+                        return Some(*index - count + 1);
+                    } else {
+                        deep -= 1;
+                        count = 0;
                     }
-                } else {
-                    count = 0;
                 }
+            } else {
+                count = 0;
             }
+            *index += 1;
         }
     }
 
@@ -147,7 +155,7 @@ impl Log64Ext for u64 {
     }
 }
 
-use std::time::Instant;
+use std::{f32::consts::E, time::Instant};
 
 fn main() {
     // FreeMap のテスト開始
