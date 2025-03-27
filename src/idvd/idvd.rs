@@ -47,54 +47,33 @@ impl FreeMap {
     pub const PAGE_SHIFT: usize = 26;
     /// FreeMap を初期化する
     pub fn new(r_size: u64) -> Self {
+        let mut pow_map: Vec<Vec<u64>> = Vec::new();
         // レイヤー数を計算
         let layer_num = r_size.log64_ceil();
-    
-        // 1回目のループで、全レイヤーのブロック総数を算出
-        let mut total_blocks: u64 = 0;
         let mut size = r_size;
-        for _ in 0..layer_num {
-            let layer_size = (size + 0x3E) >> 6;
-            total_blocks += layer_size;
-            size = layer_size;
-        }
-        let total_pages = ((total_blocks as usize) + Self::PAGE_CAPACITY - 1) / Self::PAGE_CAPACITY;
     
-        // 外側のベクタ、つまりページの容量を指定して初期化
-        let mut pow_map: Vec<Vec<u64>> = Vec::with_capacity(total_pages);
-        // 1ページ目も内側ベクタの容量を予約して初期化
-        pow_map.push(Vec::with_capacity(Self::PAGE_CAPACITY));
         let mut now_page = 0;
-    
-        // 2回目のループで、実際のブロックを設定
-        size = r_size;
-        for _layer in 0..layer_num {
+        pow_map.push(Vec::new());
+        // レイヤーごとに処理
+        for _ in 0..layer_num {
+            // レイヤーのサイズとあまりを計算
             let layer_mode = size & 0x3F;
             let layer_size = (size + 0x3E) >> 6;
-            let mut blocks_remaining = layer_size;
-            let mut block_index: u64 = 0;
-    
-            while blocks_remaining > 0 {
-                let current_capacity = Self::PAGE_CAPACITY - pow_map[now_page].len();
-                if current_capacity == 0 {
+            for i in 0..layer_size {
+                if pow_map[now_page].len() == Self::PAGE_CAPACITY {
                     now_page += 1;
                     pow_map.push(Vec::with_capacity(Self::PAGE_CAPACITY));
-                    continue;
-                }
-                let to_push = std::cmp::min(blocks_remaining as usize, current_capacity);
-                for j in 0..to_push {
-                    if block_index + j as u64 == layer_size - 1 {
+                } else {
+                    if i == layer_size - 1 {
                         pow_map[now_page].push(!0u64 << layer_mode);
                     } else {
                         pow_map[now_page].push(0);
                     }
                 }
-                blocks_remaining -= to_push as u64;
-                block_index += to_push as u64;
             }
+            
             size = layer_size;
         }
-    
         println!("layer_num: {}", layer_num);
         FreeMap { pow_map, size: r_size, layer_num }
     }
@@ -131,8 +110,7 @@ impl FreeMap {
     pub fn search_free_block(&mut self) -> Option<u64> {
         let mut block_index: u64 = 0;
         for i in (0..self.layer_num).rev() {
-            println!("map_binary: {:064b}", self.c(i, block_index));
-            let c = (*self.c(i, block_index) + 1).trailing_zeros() as u64;
+            let c = (*self.c(i, block_index)).trailing_ones() as u64;
             if c == 64 {
                 return None;
             }
@@ -141,6 +119,61 @@ impl FreeMap {
         Some(block_index)
     }
 
+    /// 線形走査で連続する空ブロックを探索するシンプル版
+    /// req は要求する連続空ブロック数（lowest layer のビット単位）
+    #[inline(always)]
+    pub fn search_free_blocks(&mut self, r_size: u64) -> Option<u64> {
+        let mut current_index: u64 = 0;
+        let mut count: u64 = 0;
+        let limit_index = self.size - r_size - 1;
+        loop {
+            // 上位レイヤーが埋まっているかどうかを確認
+            // 埋まってたらスキップ
+            'outer: loop {
+                if current_index > limit_index {
+                    return None;
+                }
+                for i in (0..self.layer_num).rev() {
+                    if i == 0 {
+                        break 'outer;
+                    }
+                    let mode = current_index & (u64::MAX >> (64 - (6 * i)));
+                    let index = current_index >> (6 * i);
+                    if mode == 0 {
+                        let c = ((*self.c(i, index >> 6) >> (index & 0x3F)) & 1) != 0;
+                        if c {
+                            current_index += 1 << (6 * i);
+                            count = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            println!("skiped");
+            // 連続する空ブロックを探索
+            // うまっていた時点でbreak
+            loop {
+                if current_index > limit_index {
+                    return None;
+                }
+                let c = ((*self.c(0, current_index >> 6) >> (current_index & 0x3F)) & 1) != 0;
+                if c {
+                    // 途中で埋まっているブロックが見つかった場合はカウントをリセットして次に進む
+                    count = 0;
+                    current_index += 1;
+                    break;
+                } else {
+                    count += 1;
+                    if count == r_size {
+                        return Some(current_index - (r_size - 1));
+                    }
+                    current_index += 1;
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
     pub fn fill_free_block(&mut self, block_index: u64) {
         let mut index = block_index >> 6;
         let mut mode = block_index & 0x3F;
@@ -152,6 +185,13 @@ impl FreeMap {
             }
             mode = index & 0x3F;
             index >>= 6;
+        }
+    }
+
+    #[inline(always)]
+    pub fn fill_blocks(&mut self, block_index: u64, r_size: u64) {
+        for i in 0..r_size {
+            self.fill_free_block(block_index + i);
         }
     }
 }
