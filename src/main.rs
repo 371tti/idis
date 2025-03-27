@@ -32,7 +32,7 @@ impl FreeMap {
             for i in 0..layer_size {
                 if pow_map[now_page].len() == Self::PAGE_CAPACITY {
                     now_page += 1;
-                    pow_map.push(Vec::new());
+                    pow_map.push(Vec::with_capacity(Self::PAGE_CAPACITY));
                 } else {
                     if i == layer_size - 1 {
                         pow_map[now_page].push(!0u64 << layer_mode);
@@ -95,13 +95,14 @@ impl FreeMap {
     pub fn search_free_blocks(&mut self, r_size: u64) -> Option<u64> {
         let mut current_index: u64 = 0;
         let mut count: u64 = 0;
+        let limit_index = self.size - r_size - 1;
         loop {
-            if current_index >= self.size {
-                return None;
-            }
             // 上位レイヤーが埋まっているかどうかを確認
             // 埋まってたらスキップ
             'outer: loop {
+                if current_index > limit_index {
+                    return None;
+                }
                 for i in (0..self.layer_num).rev() {
                     if i == 0 {
                         break 'outer;
@@ -118,11 +119,11 @@ impl FreeMap {
                     }
                 }
             }
-
+            println!("skiped");
             // 連続する空ブロックを探索
             // うまっていた時点でbreak
             loop {
-                if current_index >= self.size {
+                if current_index > limit_index {
                     return None;
                 }
                 let c = ((*self.c(0, current_index >> 6) >> (current_index & 0x3F)) & 1) != 0;
@@ -156,6 +157,13 @@ impl FreeMap {
             index >>= 6;
         }
     }
+
+    #[inline(always)]
+    pub fn fill_blocks(&mut self, block_index: u64, r_size: u64) {
+        for i in 0..r_size {
+            self.fill_free_block(block_index + i);
+        }
+    }
 }
 
 /// `u64` に `log64_ceil()` を実装
@@ -180,12 +188,13 @@ fn main() {
     println!("=== FreeMap テスト開始 ===");
 
     // FreeMap の初期化
-    let size: u64 = 16_000_000_000; // 64GB のブロックサイズを仮定
+    let size: u64 = 16_000_000_02; // 64GB のブロックサイズを仮定
     let mut free_map = FreeMap::new(size);
     println!("FreeMap を作成しました (サイズ: {} bytes)", size);
 
+    let mut allocated_count: u64 = 0;
     loop {
-        let num = 1000000; // 探索したい連続する空きブロックの数
+        let num = 10_000_00; // 探索したい連続する空きブロックの数
         let start = Instant::now();
         match free_map.search_free_blocks(num) {
             Some(start_index) => {
@@ -194,15 +203,15 @@ fn main() {
                 println!("処理時間: {:?}", duration);
                 // 見つかった連続ブロックを埋める
                 println!("埋めます");
-                for i in 0..num {
-                    free_map.fill_free_block(start_index + i);
-                }
-                println!("埋め終わりました");
+                free_map.fill_blocks(start_index, num);
+                allocated_count += 1;
+                println!("埋め終わりました。これまでに確保したブロック数: {}", allocated_count);
             },
             None => {
                 let duration = start.elapsed();
                 println!("連続した {} 個の空きブロックが見つかりませんでした", num);
                 println!("処理時間: {:?}", duration);
+                break;
             }
         }
     }
