@@ -119,7 +119,6 @@ impl FreeMap {
                     }
                 }
             }
-            println!("skiped");
             // 連続する空ブロックを探索
             // うまっていた時点でbreak
             loop {
@@ -194,7 +193,7 @@ fn main() {
 
     let mut allocated_count: u64 = 0;
     loop {
-        let num = 10_000_00; // 探索したい連続する空きブロックの数
+        let num = 1; // 探索したい連続する空きブロックの数
         let start = Instant::now();
         match free_map.search_free_blocks(num) {
             Some(start_index) => {

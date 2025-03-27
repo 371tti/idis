@@ -149,7 +149,6 @@ impl FreeMap {
                     }
                 }
             }
-            println!("skiped");
             // 連続する空ブロックを探索
             // うまっていた時点でbreak
             loop {
