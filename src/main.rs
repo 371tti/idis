@@ -89,38 +89,56 @@ impl FreeMap {
         Some(block_index)
     }
 
+    /// 線形走査で連続する空ブロックを探索するシンプル版
+    /// req は要求する連続空ブロック数（lowest layer のビット単位）
     #[inline(always)]
-    /// 空ブロックがなかったときの終了がない
-    pub fn search_free_blocks(&mut self, r_block_num: u64) -> Option<u64> {
-        let mut need_block_num_as_layer = [0u64; 16];
-        let mut block_num = r_block_num;
-        for i in 0..self.layer_num {
-            need_block_num_as_layer[i] = block_num;
-            block_num = (block_num + 0x3E) >> 6;
-        }
-        let mut deep = self.layer_num - 1;
-        let mut indices = [0u64; 16];
-        let mut count = 0;
+    pub fn search_free_blocks(&mut self, r_size: u64) -> Option<u64> {
+        let mut current_index: u64 = 0;
+        let mut count: u64 = 0;
         loop {
-            let index = &mut indices[deep];
-            let mode = *index & 0x3F;
-            let chunk_index = *index >> 6;
-            let chunk = self.c(deep, chunk_index);
-            let bit = (*chunk >> mode) & 1;
-            if bit == 0 {
-                count += 1;
-                if count == need_block_num_as_layer[deep] {
-                    if deep == 0 {
-                        return Some(*index - count + 1);
-                    } else {
-                        deep -= 1;
-                        count = 0;
+            if current_index >= self.size {
+                return None;
+            }
+            // 上位レイヤーが埋まっているかどうかを確認
+            // 埋まってたらスキップ
+            'outer: loop {
+                for i in (0..self.layer_num).rev() {
+                    if i == 0 {
+                        break 'outer;
+                    }
+                    let mode = current_index & (u64::MAX >> (64 - (6 * i)));
+                    let index = current_index >> (6 * i);
+                    if mode == 0 {
+                        let c = ((*self.c(i, index >> 6) >> (index & 0x3F)) & 1) != 0;
+                        if c {
+                            current_index += 1 << (6 * i);
+                            count = 0;
+                            break;
+                        }
                     }
                 }
-            } else {
-                count = 0;
             }
-            *index += 1;
+
+            // 連続する空ブロックを探索
+            // うまっていた時点でbreak
+            loop {
+                if current_index >= self.size {
+                    return None;
+                }
+                let c = ((*self.c(0, current_index >> 6) >> (current_index & 0x3F)) & 1) != 0;
+                if c {
+                    // 途中で埋まっているブロックが見つかった場合はカウントをリセットして次に進む
+                    count = 0;
+                    current_index += 1;
+                    break;
+                } else {
+                    count += 1;
+                    if count == r_size {
+                        return Some(current_index - (r_size - 1));
+                    }
+                    current_index += 1;
+                }
+            }
         }
     }
 
@@ -167,21 +185,26 @@ fn main() {
     println!("FreeMap を作成しました (サイズ: {} bytes)", size);
 
     loop {
-    // 空きブロックを検索
-    let start = Instant::now();
-    match free_map.search_free_block() {
-        Some(index) => {
-            let duration = start.elapsed();
-            println!("空きブロックが見つかりました: {}", index);
-            println!("処理時間: {:?}", duration);
-            free_map.fill_free_block(index);
-        }
-        None => {
-            let duration = start.elapsed();
-            println!("空きブロックが見つかりませんでした");
-            println!("処理時間: {:?}", duration);
+        let num = 1000000; // 探索したい連続する空きブロックの数
+        let start = Instant::now();
+        match free_map.search_free_blocks(num) {
+            Some(start_index) => {
+                let duration = start.elapsed();
+                println!("連続した {} 個の空きブロックが見つかりました: {}", num, start_index);
+                println!("処理時間: {:?}", duration);
+                // 見つかった連続ブロックを埋める
+                println!("埋めます");
+                for i in 0..num {
+                    free_map.fill_free_block(start_index + i);
+                }
+                println!("埋め終わりました");
+            },
+            None => {
+                let duration = start.elapsed();
+                println!("連続した {} 個の空きブロックが見つかりませんでした", num);
+                println!("処理時間: {:?}", duration);
+            }
         }
     }
-}
     println!("=== FreeMap テスト終了 ===");
 }
