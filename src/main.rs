@@ -1,3 +1,60 @@
+use idis::cash;
+use linked_hash_map::LinkedHashMap;
+use tokio::{fs::File, io::{AsyncReadExt, AsyncSeekExt}};
+
+pub struct IDVD {
+    pub size: u64,
+    pub block_size: u64,
+    pub bit_map_pos: u64,
+    pub cluster_index_pos: u64,
+    pub vd_gen: u64,
+    pub hash_seed: u64,
+    pub vd_version: u64,
+
+    pub raw_idvd: RawIDVD,
+}
+
+
+
+
+
+pub struct RawIDVD {
+    pub free_map: FreeMap,
+    pub id_map: IDMap,
+    pub cluster_map: ClusterMap,
+    pub object_map: ObjectMap,
+}
+
+pub struct IDMap {
+    pub ruid: Vec<u128>,
+    pub map_pos: Vec<u64>,
+}
+
+pub struct ClusterMap {
+    pub ruid: u128,
+    pub len: u64,
+}
+
+pub struct ClusterEntry {
+    pub generation: u64,
+    pub cluster: Vec<Cluster>,
+}
+
+pub struct Cluster {
+    pub pos: u64,
+    pub len: u64,
+}
+
+pub struct ObjectMap {
+    pub map: BTreeMap<u128, ObjectEntry>,
+}
+
+pub struct ObjectEntry {
+    pub len: u64,
+    pub pos: u64,
+    pub object: Vec<u8>,
+}
+
 /// 領域アロケーター
 /// ページ単位で管理
 /// ページあたりのブロック数は274,877,906,944 = 2^32 * 64
@@ -180,39 +237,102 @@ impl Log64Ext for u64 {
     }
 }
 
-use std::{f32::consts::E, time::Instant};
+use std::{collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, time::Instant};
 
-fn main() {
-    // FreeMap のテスト開始
-    println!("=== FreeMap テスト開始 ===");
+// fn main() {
+//     // FreeMap のテスト開始
+//     println!("=== FreeMap テスト開始 ===");
 
-    // FreeMap の初期化
-    let size: u64 = 16_000_000_02; // 64GB のブロックサイズを仮定
-    let mut free_map = FreeMap::new(size);
-    println!("FreeMap を作成しました (サイズ: {} bytes)", size);
+//     // FreeMap の初期化
+//     let size: u64 = 16_000_000_02; // 64GB のブロックサイズを仮定
+//     let mut free_map = FreeMap::new(size);
+//     println!("FreeMap を作成しました (サイズ: {} bytes)", size);
 
-    let mut allocated_count: u64 = 0;
-    loop {
-        let num = 1; // 探索したい連続する空きブロックの数
-        let start = Instant::now();
-        match free_map.search_free_blocks(num) {
-            Some(start_index) => {
-                let duration = start.elapsed();
-                println!("連続した {} 個の空きブロックが見つかりました: {}", num, start_index);
-                println!("処理時間: {:?}", duration);
-                // 見つかった連続ブロックを埋める
-                println!("埋めます");
-                free_map.fill_blocks(start_index, num);
-                allocated_count += 1;
-                println!("埋め終わりました。これまでに確保したブロック数: {}", allocated_count);
-            },
-            None => {
-                let duration = start.elapsed();
-                println!("連続した {} 個の空きブロックが見つかりませんでした", num);
-                println!("処理時間: {:?}", duration);
-                break;
-            }
+//     let mut allocated_count: u64 = 0;
+//     loop {
+//         let num = 1; // 探索したい連続する空きブロックの数
+//         let start = Instant::now();
+//         match free_map.search_free_blocks(num) {
+//             Some(start_index) => {
+//                 let duration = start.elapsed();
+//                 println!("連続した {} 個の空きブロックが見つかりました: {}", num, start_index);
+//                 println!("処理時間: {:?}", duration);
+//                 // 見つかった連続ブロックを埋める
+//                 println!("埋めます");
+//                 free_map.fill_blocks(start_index, num);
+//                 allocated_count += 1;
+//                 println!("埋め終わりました。これまでに確保したブロック数: {}", allocated_count);
+//             },
+//             None => {
+//                 let duration = start.elapsed();
+//                 println!("連続した {} 個の空きブロックが見つかりませんでした", num);
+//                 println!("処理時間: {:?}", duration);
+//                 break;
+//             }
+//         }
+//     }
+//     println!("=== FreeMap テスト終了 ===");
+// }
+
+
+
+pub struct DriverCash {
+    pub cashed_max_size: u64,
+    pub block_size: u64,
+    pub map: LinkedHashMap<u64, CashEntry>,
+    pub file: File,
+}
+
+impl DriverCash {
+    pub fn new(file: File, cashed_max_size: u64, block_size: u64) -> Self {
+        let mut map = LinkedHashMap::with_capacity(cashed_max_size as usize);
+        map.reserve(cashed_max_size as usize);
+        DriverCash {
+            cashed_max_size,
+            block_size,
+            map,
+            file,
         }
     }
-    println!("=== FreeMap テスト終了 ===");
+
+    pub fn resize(&mut self, new_size: u64) {
+        self.cashed_max_size = new_size;
+        while self.map.len() > new_size as usize {
+            self.map.pop_front();            
+        }
+        self.map.shrink_to_fit();
+    }
+
+    pub async fn read(&mut self, block_pos: u64) -> Result<&CashEntry, tokio::io::Error> {
+        if self.map.contains_key(&block_pos) {
+            return Ok(self.map.get(&block_pos).unwrap());
+        }
+        let mut buf = vec![0; self.block_size as usize];
+        self.file.seek(std::io::SeekFrom::Start(block_pos * self.block_size)).await?;
+        self.file.read_exact(&mut buf).await?;
+        let entry = CashEntry { data: buf, dirty: false };
+        self.map.insert(block_pos, entry);
+        Ok(self.map.get(&block_pos).unwrap())
+    }
+
+    pub async fn write(&mut self, block_pos: u64, data: &[u8]) -> Result<(), tokio::io::Error> {
+        self.map.insert(block_pos, CashEntry { data: data.to_vec(), dirty: true });
+        Ok(())
+    }
+}
+
+pub struct CashEntry {
+    pub data: Vec<u8>,
+    pub dirty: bool,
+}
+
+#[tokio::main]
+async fn main() {
+    println!("Hello, world!");
+    let file = File::open("Cargo.lock").await.unwrap();
+    let mut driver_cash = DriverCash::new(file, 10, 4096);
+    driver_cash.resize(20);
+    let block_pos = 0;
+    let data = driver_cash.read(block_pos).await.unwrap();
+    println!("Read data as UTF-8: {}", String::from_utf8_lossy(&data.data));
 }
