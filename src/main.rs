@@ -1,6 +1,7 @@
 use idis::cash;
 use linked_hash_map::LinkedHashMap;
-use tokio::{fs::File, io::{AsyncReadExt, AsyncSeekExt}};
+use lru::LruCache;
+use tokio::{fs::File, io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt}};
 
 pub struct IDVD {
     pub size: u64,
@@ -237,7 +238,7 @@ impl Log64Ext for u64 {
     }
 }
 
-use std::{collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, time::Instant};
+use std::{collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, num::NonZero, time::Instant};
 
 // fn main() {
 //     // FreeMap のテスト開始
@@ -276,63 +277,89 @@ use std::{collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, time::Inst
 
 
 
+pub struct CashEntry {
+    pub data: Vec<u8>,
+}
+
 pub struct DriverCash {
-    pub cashed_max_size: u64,
+    pub cashed_max_blocks: usize,
     pub block_size: u64,
-    pub map: LinkedHashMap<u64, CashEntry>,
+    pub map: LruCache<u64, CashEntry>,
     pub file: File,
 }
 
 impl DriverCash {
-    pub fn new(file: File, cashed_max_size: u64, block_size: u64) -> Self {
-        let mut map = LinkedHashMap::with_capacity(cashed_max_size as usize);
-        map.reserve(cashed_max_size as usize);
-        DriverCash {
-            cashed_max_size,
+    pub fn new(file: File, cashed_max_blocks: usize, block_size: u64) -> Self {
+        Self {
+            cashed_max_blocks,
             block_size,
-            map,
+            map: LruCache::new(NonZero::new(cashed_max_blocks).unwrap()),
             file,
         }
     }
 
-    pub fn resize(&mut self, new_size: u64) {
-        self.cashed_max_size = new_size;
-        while self.map.len() > new_size as usize {
-            self.map.pop_front();            
-        }
-        self.map.shrink_to_fit();
-    }
-
-    pub async fn read(&mut self, block_pos: u64) -> Result<&CashEntry, tokio::io::Error> {
-        if self.map.contains_key(&block_pos) {
+    /// ブロックを読み込む（キャッシュに無ければファイルから）
+    pub async fn read_block(&mut self, block_pos: u64) -> io::Result<&CashEntry> {
+        if self.map.contains(&block_pos) {
             return Ok(self.map.get(&block_pos).unwrap());
         }
-        let mut buf = vec![0; self.block_size as usize];
-        self.file.seek(std::io::SeekFrom::Start(block_pos * self.block_size)).await?;
+
+        let mut buf = vec![0u8; self.block_size as usize];
+        self.file
+            .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
+            .await?;
         self.file.read_exact(&mut buf).await?;
-        let entry = CashEntry { data: buf, dirty: false };
-        self.map.insert(block_pos, entry);
+
+        let entry = CashEntry { data: buf };
+        self.map.put(block_pos, entry);
+
         Ok(self.map.get(&block_pos).unwrap())
     }
 
-    pub async fn write(&mut self, block_pos: u64, data: &[u8]) -> Result<(), tokio::io::Error> {
-        self.map.insert(block_pos, CashEntry { data: data.to_vec(), dirty: true });
+    /// ブロックを書き込む（キャッシュがあれば更新、ファイルにも即書き込み）
+    pub async fn write_block(&mut self, block_pos: u64, data: &[u8]) -> io::Result<()> {
+        if let Some(entry) = self.map.get_mut(&block_pos) {
+            if entry.data.len() != data.len() {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid block size"));
+            }
+            entry.data.copy_from_slice(data);
+        }
+
+        self.file
+            .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
+            .await?;
+        self.file.write_all(data).await?;
+        Ok(())
+    }
+
+    /// 強制的にファイルをフラッシュ（整合性のため）
+    pub async fn sync(&mut self) -> io::Result<()> {
+        self.file.flush().await?;
+        self.file.sync_all().await?;
         Ok(())
     }
 }
 
-pub struct CashEntry {
-    pub data: Vec<u8>,
-    pub dirty: bool,
-}
 
 #[tokio::main]
 async fn main() {
     println!("Hello, world!");
-    let file = File::open("Cargo.lock").await.unwrap();
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("lol.bin")
+        .await
+        .unwrap();
     let mut driver_cash = DriverCash::new(file, 10, 4096);
     driver_cash.resize(20);
     let block_pos = 0;
+    let data = b"Hello, world!";
+    driver_cash.write(block_pos, data).await.unwrap();
+    driver_cash.write(block_pos + 1, data).await.unwrap();
+    driver_cash.flush(block_pos);
+    driver_cash.flush(block_pos + 1);
+    driver_cash.sync().await.unwrap();
     let data = driver_cash.read(block_pos).await.unwrap();
     println!("Read data as UTF-8: {}", String::from_utf8_lossy(&data.data));
 }
