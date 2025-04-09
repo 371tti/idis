@@ -350,6 +350,7 @@ pub struct DriverCash {
     pub cashed_max_blocks: usize,
     pub block_size: u64,
     pub map: LruCache<u64, CashEntry>,
+    pub write_buf: Vec<(u64, CashEntry)>,
     pub file: File,
 }
 
@@ -359,12 +360,14 @@ impl DriverCash {
             cashed_max_blocks,
             block_size,
             map: LruCache::new(NonZero::new(cashed_max_blocks).unwrap()),
+            write_buf: Vec::new(),
             file,
         }
     }
 
     /// ブロックを読み込む（キャッシュに無ければファイルから）
     pub async fn read_block(&mut self, block_pos: u64) -> io::Result<&CashEntry> {
+        // キャッシュに存在する場合
         if self.map.contains(&block_pos) {
             return Ok(self.map.get(&block_pos).unwrap());
         }
@@ -386,30 +389,34 @@ impl DriverCash {
     }
 
     /// ブロックを書き込む（キャッシュがあれば更新、ファイルにも即書き込み）
-    pub async fn write_block(&mut self, block_pos: u64, data: &[u8]) -> io::Result<()> {
+    pub async fn write_block(&mut self, block_pos: u64, data: CashEntry) -> io::Result<()> {
+        // キャッシュに存在する場合
         if let Some(entry) = self.map.get_mut(&block_pos) {
-            if entry.size != data.len() {
+            if entry.size != data.size {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid block size"));
             }
-            entry.copy_from_slice(data);
+            entry.copy_from_slice(&data);
         }
 
-        self.file
-            .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
-            .await?;
-        self.file.write_all(data).await?;
+        self.write_buf.push((block_pos, data));
         Ok(())
     }
 
     /// 強制的にファイルをフラッシュ（整合性のため）
     pub async fn sync(&mut self) -> io::Result<()> {
+        self.write_buf.sort_by_key(|(block_pos, _)| *block_pos);
+        for (block_pos, entry) in &self.write_buf {
+            self.file
+                .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
+                .await?;
+            self.file.write_all(entry).await?;
+        }
         self.file.flush().await?;
         self.file.sync_all().await?;
         Ok(())
     }
 }
 
-<<<<<<< HEAD
 pub struct Cash {
     pub driver: DriverCash,
 }
@@ -417,40 +424,6 @@ pub struct Cash {
 impl Cash {
     pub fn new() -> Self {
         Self {}
-=======
-pub struct IDVDCash {
-    pub driver: DriverCash,
-}
-
-impl IDVDCash {
-    pub async fn with_file(file: File) -> Self {
-        let file_size = file.metadata().await.unwrap().len();
-        // ファイルヘッダから設定を読み込む
-        let driver = DriverCash::new(file, 10, 4096);
-        Self { driver }
-    }
-    
-    pub async fn read(&mut self, pos: u64, buf: &mut [u8]) -> io::Result<()> {
-        let mut block_pos = pos / self.driver.block_size;
-        let offset = pos % self.driver.block_size;
-        let mut relen = buf.len();
-        /// 先頭ブロックだけ別処理
-        let entry = self.driver.read_block(block_pos).await?;
-        buf.copy_from_slice(&entry.data[offset as usize..relen]);
-        while relen > 0 {
-            let entry = self.driver.read_block(block_pos).await?;
-            
-        }
-        Ok(())
-    }
-
-    pub async fn write(&mut self, pos: u64, buf: &[u8]) -> io::Result<()> {
-        // あとで実装
-    }
-
-    pub async fn sync(&mut self, pos: u64) {
-        // あとで実装
->>>>>>> a2c7cebb1bf75bf191628fb80555eff981af30f6
     }
 }
 
