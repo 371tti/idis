@@ -238,7 +238,7 @@ impl Log64Ext for u64 {
     }
 }
 
-use std::{collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, num::NonZero, time::Instant};
+use std::{alloc::{alloc, dealloc, Layout}, collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, num::NonZero, ops::{Deref, DerefMut}, ptr::{self, NonNull}, time::Instant};
 
 // fn main() {
 //     // FreeMap のテスト開始
@@ -276,11 +276,76 @@ use std::{collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, num::NonZe
 // }
 
 
-
+/// キャッシュエントリ
+/// 
+/// キャッシュエントリは、メモリを確保し、スライスとして扱えるようにする構造体です。
 pub struct CashEntry {
-    pub data: Vec<u8>,
+    ptr: NonNull<u8>,
+    size: usize,
+    align: usize,
 }
 
+impl CashEntry {
+    /// サイズとアライメントを指定してメモリを確保する
+    /// # Safety
+    /// メモリの使用に関しては、適切なアライメントとサイズを保証する必要があります。
+    /// 
+    /// # Arguments
+    /// * `size` - 確保するメモリのサイズ
+    /// * `align` - メモリのアライメント
+    /// 
+    /// # Returns
+    /// * `CashEntry` - 確保されたメモリを持つ構造体
+    pub fn with_size_aligned(size: usize, align: usize) -> Self {
+        // リリースビルドで消える
+        assert!(align.is_power_of_two(), "Alignment must be a power of 2");
+
+        let layout = Layout::from_size_align(size, align).expect("Invalid layout");
+        let ptr = unsafe { alloc(layout) };
+
+        let ptr = NonNull::new(ptr).expect("Failed to allocate memory");
+
+        Self { ptr, size, align }
+    }
+
+    /// 可変スライスとしてメモリを取得する
+    /// # Safety
+    /// メモリの使用に関しては、適切なアライメントとサイズを保証する必要があります。
+    /// 
+    /// # Returns
+    /// * `&mut [u8]` - 可変スライス
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size) }
+    }
+}
+
+// スライスとして扱えるようにする
+impl Deref for CashEntry {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.size) }
+    }
+}
+
+impl DerefMut for CashEntry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
+    }
+}
+
+impl Drop for CashEntry {
+    fn drop(&mut self) {
+        unsafe {
+            let layout = Layout::from_size_align(self.size, self.align).unwrap();
+            dealloc(self.ptr.as_ptr(), layout);
+        }
+    }
+}
+
+
+/// cashドライバ
+/// ブロック単位でキャッシュを管理する
 pub struct DriverCash {
     pub cashed_max_blocks: usize,
     pub block_size: u64,
@@ -304,13 +369,13 @@ impl DriverCash {
             return Ok(self.map.get(&block_pos).unwrap());
         }
 
-        let mut buf = vec![0u8; self.block_size as usize];
+        let mut entry = CashEntry::with_size_aligned(self.block_size as usize, self.block_size as usize);
+        let mut buf = entry.as_mut_slice();
         self.file
             .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
             .await?;
         self.file.read_exact(&mut buf).await?;
 
-        let entry = CashEntry { data: buf };
         self.map.put(block_pos, entry);
 
         Ok(self.map.get(&block_pos).unwrap())
@@ -319,10 +384,10 @@ impl DriverCash {
     /// ブロックを書き込む（キャッシュがあれば更新、ファイルにも即書き込み）
     pub async fn write_block(&mut self, block_pos: u64, data: &[u8]) -> io::Result<()> {
         if let Some(entry) = self.map.get_mut(&block_pos) {
-            if entry.data.len() != data.len() {
+            if entry.size != data.len() {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid block size"));
             }
-            entry.data.copy_from_slice(data);
+            entry.copy_from_slice(data);
         }
 
         self.file
@@ -337,6 +402,16 @@ impl DriverCash {
         self.file.flush().await?;
         self.file.sync_all().await?;
         Ok(())
+    }
+}
+
+pub struct Cash {
+    pub driver: DriverCash,
+}
+
+impl Cash {
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
