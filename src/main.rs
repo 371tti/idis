@@ -3,6 +3,11 @@ use linked_hash_map::LinkedHashMap;
 use lru::LruCache;
 use tokio::{fs::File, io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt}};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(target_os = "windows")]
+use winapi::um::winbase::FILE_FLAG_NO_BUFFERING;
+
 pub struct IDVD {
     pub size: u64,
     pub block_size: u64,
@@ -238,7 +243,7 @@ impl Log64Ext for u64 {
     }
 }
 
-use std::{alloc::{alloc, dealloc, Layout}, collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, num::NonZero, ops::{Deref, DerefMut}, ptr::{self, NonNull}, time::Instant};
+use std::{alloc::{alloc, dealloc, Layout}, collections::{BTreeMap, HashMap, VecDeque}, f32::consts::E, num::NonZero, ops::{Deref, DerefMut}, path::Path, ptr::{self, NonNull}, time::Instant};
 
 // fn main() {
 //     // FreeMap のテスト開始
@@ -403,6 +408,7 @@ impl DriverCash {
     }
 
     /// 強制的にファイルをフラッシュ（整合性のため）
+    /// 最適化すべき
     pub async fn sync(&mut self) -> io::Result<()> {
         self.write_buf.sort_by_key(|(block_pos, _)| *block_pos);
         for (block_pos, entry) in &self.write_buf {
@@ -422,8 +428,22 @@ pub struct Cash {
 }
 
 impl Cash {
-    pub fn new() -> Self {
-        Self {}
+    pub async fn new(path: &Path, size: u64) -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            
+            let file = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                // Windows-specific flag: disable buffering
+                .custom_flags(FILE_FLAG_NO_BUFFERING)
+                .open(path)
+                .await
+                .unwrap();
+            let driver = DriverCash::new(file, 10, 4096);
+            Self { driver }
+        }
     }
 }
 
