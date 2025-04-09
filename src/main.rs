@@ -12,7 +12,7 @@ pub struct IDVD {
     pub hash_seed: u64,
     pub vd_version: u64,
 
-    pub raw_idvd: RawIDVD,
+    pub cash_idvd: IDVDCash,
 }
 
 
@@ -381,6 +381,10 @@ impl DriverCash {
         Ok(self.map.get(&block_pos).unwrap())
     }
 
+    pub fn contain(&self, block_pos: u64) -> bool {
+        self.map.contains(&block_pos)
+    }
+
     /// ブロックを書き込む（キャッシュがあれば更新、ファイルにも即書き込み）
     pub async fn write_block(&mut self, block_pos: u64, data: &[u8]) -> io::Result<()> {
         if let Some(entry) = self.map.get_mut(&block_pos) {
@@ -405,6 +409,7 @@ impl DriverCash {
     }
 }
 
+<<<<<<< HEAD
 pub struct Cash {
     pub driver: DriverCash,
 }
@@ -412,6 +417,40 @@ pub struct Cash {
 impl Cash {
     pub fn new() -> Self {
         Self {}
+=======
+pub struct IDVDCash {
+    pub driver: DriverCash,
+}
+
+impl IDVDCash {
+    pub async fn with_file(file: File) -> Self {
+        let file_size = file.metadata().await.unwrap().len();
+        // ファイルヘッダから設定を読み込む
+        let driver = DriverCash::new(file, 10, 4096);
+        Self { driver }
+    }
+    
+    pub async fn read(&mut self, pos: u64, buf: &mut [u8]) -> io::Result<()> {
+        let mut block_pos = pos / self.driver.block_size;
+        let offset = pos % self.driver.block_size;
+        let mut relen = buf.len();
+        /// 先頭ブロックだけ別処理
+        let entry = self.driver.read_block(block_pos).await?;
+        buf.copy_from_slice(&entry.data[offset as usize..relen]);
+        while relen > 0 {
+            let entry = self.driver.read_block(block_pos).await?;
+            
+        }
+        Ok(())
+    }
+
+    pub async fn write(&mut self, pos: u64, buf: &[u8]) -> io::Result<()> {
+        // あとで実装
+    }
+
+    pub async fn sync(&mut self, pos: u64) {
+        // あとで実装
+>>>>>>> a2c7cebb1bf75bf191628fb80555eff981af30f6
     }
 }
 
