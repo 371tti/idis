@@ -17,7 +17,7 @@ pub struct IDVD {
     pub hash_seed: u64,
     pub vd_version: u64,
 
-    pub cash_idvd: IDVDCash,
+    pub cash_idvd: Cash,
 }
 
 
@@ -451,22 +451,4 @@ impl Cash {
 #[tokio::main]
 async fn main() {
     println!("Hello, world!");
-    let file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open("lol.bin")
-        .await
-        .unwrap();
-    let mut driver_cash = DriverCash::new(file, 10, 4096);
-    driver_cash.resize(20);
-    let block_pos = 0;
-    let data = b"Hello, world!";
-    driver_cash.write(block_pos, data).await.unwrap();
-    driver_cash.write(block_pos + 1, data).await.unwrap();
-    driver_cash.flush(block_pos);
-    driver_cash.flush(block_pos + 1);
-    driver_cash.sync().await.unwrap();
-    let data = driver_cash.read(block_pos).await.unwrap();
-    println!("Read data as UTF-8: {}", String::from_utf8_lossy(&data.data));
 }
