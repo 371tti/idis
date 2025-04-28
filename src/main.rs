@@ -1,4 +1,4 @@
-use idis::cash;
+use idis::{cash, utils::target::get_bytes_per_sector};
 use linked_hash_map::LinkedHashMap;
 use lru::LruCache;
 use tokio::{fs::File, io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt}};
@@ -423,6 +423,7 @@ impl DriverCash {
     }
 }
 
+/// キャッシュ構造体
 pub struct Cash {
     pub driver: DriverCash,
 }
@@ -431,7 +432,10 @@ impl Cash {
     pub async fn new(path: &Path, size: u64) -> Self {
         #[cfg(target_os = "windows")]
         {
-            
+            let dir = path.parent()
+                .unwrap_or_else(|| Path::new(r"I:\"));
+            let sector_size = get_bytes_per_sector(dir).unwrap();
+            let cashed_block_size = size / sector_size as u64;
             let file = tokio::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -441,9 +445,33 @@ impl Cash {
                 .open(path)
                 .await
                 .unwrap();
-            let driver = DriverCash::new(file, 10, 4096);
+            let driver = DriverCash::new(file, cashed_block_size as usize, sector_size as u64);
             Self { driver }
         }
+    }
+
+    pub async fn read(&mut self, buffer: &mut [u8], pos: u64) -> io::Result<()> {
+        let mut remaining = buffer.len();
+        let mut buf_offset = 0;
+        let mut current_pos = pos;
+
+        while remaining > 0 {
+            let block_pos = current_pos / self.driver.block_size;
+            let block_offset = (current_pos % self.driver.block_size) as usize;
+            let entry = self.driver.read_block(block_pos).await?;
+            let data = entry.as_ref(); // &[u8] のビュー
+            // このブロックからコピーできる長さ
+            let to_copy = std::cmp::min(remaining, data.len() - block_offset);
+
+            buffer[buf_offset..buf_offset + to_copy]
+                .copy_from_slice(&data[block_offset..block_offset + to_copy]);
+
+            buf_offset += to_copy;
+            current_pos += to_copy as u64;
+            remaining -= to_copy;
+        }
+
+        Ok(())
     }
 }
 
@@ -451,4 +479,15 @@ impl Cash {
 #[tokio::main]
 async fn main() {
     println!("Hello, world!");
+    let size = 1024;
+    let mut cash = Cash::new(Path::new("I:\\RustBuilds\\IDIS\\main\\idis\\lol.bin"), size).await;
+    
+
+    let mut buffer = vec![0u8; 13];
+    if let Err(e) = cash.read(&mut buffer, 0).await {
+        eprintln!("Error reading from cache: {}", e);
+    }
+    
+    println!("Buffer: {:?}", buffer);
+    // ここでキャッシュを使用するコードを追加できます
 }
