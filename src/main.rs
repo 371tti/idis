@@ -560,7 +560,7 @@ impl Cash {
 
         // 後ろの重なり部分をオーバーライド
         let mut last_block = self.driver.read_block(now_block_pos).await?;
-        last_block.copy_from_slice(&buffer[buffer_seek..len]);
+        last_block[..(len - buffer_seek)].copy_from_slice(&buffer[buffer_seek..]);
         self.driver.write_block(now_block_pos, last_block).await?;
 
         Ok(())
@@ -605,7 +605,7 @@ async fn main() {
     println!("Second read took: {:?}", d2);
 
     // 文字列を1回だけ書き込むテスト
-    let mut data = "こんにちわ世界 私たちの目的は異常なオブジェクトの収容と保護です。".as_bytes().to_vec();
+    let mut data = tokio::fs::read("buf.txt").await.unwrap();
     cache.write(&mut data, 0).await.unwrap();
     cache.sync().await.unwrap();
 
