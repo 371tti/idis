@@ -575,7 +575,7 @@ impl Cash {
 async fn main() {
 
     // キャッシュ用ファイルとブロックサイズ
-    let path = Path::new("I:\\RustBuilds\\IDIS\\main\\idis\\lol.bin");
+    let path = Path::new("./lol.bin");
     // ① まずファイルを開いて……
     let file = tokio::fs::OpenOptions::new()
         .read(true)
@@ -606,11 +606,11 @@ async fn main() {
 
     // 文字列を1回だけ書き込むテスト
     let mut data = tokio::fs::read("buf.txt").await.unwrap();
-    cache.write(&mut data, 0).await.unwrap();
+    cache.write(&mut data, 10000).await.unwrap();
     cache.sync().await.unwrap();
 
     // 書き込んだ内容を読み込んで確認
     let mut buf = vec![0u8; data.len()];
-    cache.read(&mut buf, 0).await.unwrap();
+    cache.read(&mut buf, 10002).await.unwrap();
     println!("Read data: {:?}", String::from_utf8_lossy(&buf));
 }
