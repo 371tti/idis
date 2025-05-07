@@ -2,17 +2,16 @@ use std::{alloc::{alloc, dealloc, Layout}, num::NonZero, ops::{Deref, DerefMut},
 
 use lru::LruCache;
 use tokio::{fs::File, io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt}};
-use winapi::um::winbase::FILE_FLAG_NO_BUFFERING;
 
 use crate::utils::target::fs::{get_bytes_per_sector, open_file_direct};
 
-pub struct CashEntry {
+pub struct CacheEntry {
     ptr: NonNull<u8>,
     size: usize,
     align: usize,
 }
 
-impl CashEntry {
+impl CacheEntry {
     /// サイズとアライメントを指定してメモリを確保する
     /// # Safety
     /// メモリの使用に関しては、適切なアライメントとサイズを保証する必要があります。
@@ -26,7 +25,7 @@ impl CashEntry {
     #[inline]
     pub fn with_size_aligned(size: usize, align: usize) -> Self {
         // リリースビルドで消える
-        assert!(align.is_power_of_two(), "Alignment must be a power of 2");
+        debug_assert!(align.is_power_of_two(), "Alignment must be a power of 2");
 
         let layout = Layout::from_size_align(size, align).expect("Invalid layout");
         let ptr = unsafe { alloc(layout) };
@@ -49,7 +48,7 @@ impl CashEntry {
 }
 
 // スライスとして扱えるようにする
-impl Deref for CashEntry {
+impl Deref for CacheEntry {
     type Target = [u8];
 
     #[inline]
@@ -58,7 +57,7 @@ impl Deref for CashEntry {
     }
 }
 
-impl DerefMut for CashEntry {
+impl DerefMut for CacheEntry {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut_slice()
@@ -66,10 +65,10 @@ impl DerefMut for CashEntry {
 }
 
 
-impl Clone for CashEntry {
+impl Clone for CacheEntry {
     fn clone(&self) -> Self {
         // 新しい領域を確保
-        let mut new_entry = CashEntry::with_size_aligned(self.size, self.align);
+        let mut new_entry = CacheEntry::with_size_aligned(self.size, self.align);
         // 中身をディープコピー
         new_entry.as_mut_slice().copy_from_slice(&self[..]);
         new_entry
@@ -77,7 +76,7 @@ impl Clone for CashEntry {
 }
 
 
-impl Drop for CashEntry {
+impl Drop for CacheEntry {
     #[inline]
     fn drop(&mut self) {
         unsafe {
@@ -93,8 +92,8 @@ impl Drop for CashEntry {
 pub struct DriverCash {
     pub cashed_max_blocks: usize,
     pub block_size: u64,
-    pub map: LruCache<u64, CashEntry>,
-    pub write_buf: Vec<(u64, CashEntry)>,
+    pub map: LruCache<u64, CacheEntry>,
+    pub write_buf: Vec<(u64, CacheEntry)>,
     pub file: File,
 }
 
@@ -112,13 +111,13 @@ impl DriverCash {
 
     /// ブロックを読み込む（キャッシュに無ければファイルから）
     #[inline]
-    pub async fn read_block(&mut self, block_pos: u64) -> io::Result<CashEntry> {
+    pub async fn read_block(&mut self, block_pos: u64) -> io::Result<CacheEntry> {
         // キャッシュに存在する場合
         if self.map.contains(&block_pos) {
             return Ok(self.map.get(&block_pos).unwrap().clone());
         }
 
-        let mut entry = CashEntry::with_size_aligned(self.block_size as usize, self.block_size as usize);
+        let mut entry = CacheEntry::with_size_aligned(self.block_size as usize, self.block_size as usize);
         let mut buf = entry.as_mut_slice();
         self.file
             .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
@@ -129,13 +128,13 @@ impl DriverCash {
     }
 
     #[inline]
-    pub async fn read_block_cashing(&mut self, block_pos: u64) -> io::Result<&CashEntry> {
+    pub async fn read_block_cashing(&mut self, block_pos: u64) -> io::Result<&CacheEntry> {
         // キャッシュに存在する場合
         if self.map.contains(&block_pos) {
             return Ok(self.map.get(&block_pos).unwrap());
         }
 
-        let mut entry = CashEntry::with_size_aligned(self.block_size as usize, self.block_size as usize);
+        let mut entry = CacheEntry::with_size_aligned(self.block_size as usize, self.block_size as usize);
         let mut buf = entry.as_mut_slice();
         self.file
             .seek(std::io::SeekFrom::Start(block_pos * self.block_size))
@@ -154,7 +153,7 @@ impl DriverCash {
 
     /// ブロックを書き込む（キャッシュがあれば更新、ファイルにも即書き込み）
     #[inline]
-    pub async fn write_block(&mut self, block_pos: u64, data: CashEntry) -> io::Result<()> {
+    pub async fn write_block(&mut self, block_pos: u64, data: CacheEntry) -> io::Result<()> {
         // キャッシュに存在する場合
         if let Some(entry) = self.map.get_mut(&block_pos) {
             if entry.size != data.size {
@@ -188,6 +187,11 @@ impl DriverCash {
     pub fn clear(&mut self) {
         self.map.clear();
     }
+
+    #[inline]
+    pub fn drop_block(&mut self, block_pos: u64) {
+        self.map.pop(&block_pos);
+    }
 }
 
 /// キャッシュ構造体
@@ -201,7 +205,7 @@ impl Cash {
     #[inline]
     pub async fn new(path: &Path, size: u64) -> io::Result<Self> {
         let dir = path.parent()
-            .unwrap_or_else(|| Path::new(r"I:\"));
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid path"))?;
         let sector_size = get_bytes_per_sector(dir)? as u64;
         // サイズをセクタサイズで割る. 切り下げ.
         let cashed_block_size = size / sector_size as u64;
@@ -258,7 +262,7 @@ impl Cash {
         // ブロックまるまるかきかえるやつを一気に書き込む
         let mut now_block_pos = (pos + buffer_seek as u64) / self.driver.block_size;
         while self.driver.block_size <= (len - buffer_seek) as u64 {
-            let mut new_block = CashEntry::with_size_aligned(self.driver.block_size as usize, self.driver.block_size as usize);
+            let mut new_block = CacheEntry::with_size_aligned(self.driver.block_size as usize, self.driver.block_size as usize);
             new_block.copy_from_slice(&buffer[buffer_seek..(buffer_seek + self.driver.block_size as usize)]);
             self.driver.write_block(now_block_pos as u64, new_block).await?;
             buffer_seek += self.driver.block_size as usize;
@@ -280,5 +284,10 @@ impl Cash {
 
     pub async fn sync(&mut self) -> io::Result<()> {
         self.driver.sync().await
+    }
+
+    pub async fn clear(&mut self) -> io::Result<()> {
+        self.driver.clear();
+        Ok(())
     }
 }
