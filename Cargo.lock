@@ -204,6 +204,7 @@ dependencies = [
  "linked-hash-map",
  "lru",
  "rand",
+ "rand_chacha",
  "serde",
  "serde_json",
  "tokio",
