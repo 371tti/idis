@@ -1,4 +1,4 @@
-use idis::{cash, idvd::{allocator::FreeMap, cache::Cash}};
+use idis::{cache, idvd::{allocator::FreeMap, cache::Cash}};
 pub struct IDVD {
     pub size: u64,
     pub block_size: u64,

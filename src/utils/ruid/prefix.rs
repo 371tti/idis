@@ -1,4 +1,3 @@
-
 pub const UNCATEGORIZED_DATA: u16 = 0x0000;
 pub mod file {
     pub const FILE_UNCATEGORIZED: u16 = 0x1000;
